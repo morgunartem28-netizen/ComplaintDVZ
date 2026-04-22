@@ -1,0 +1,1862 @@
+# СОБРАННЫЙ КОД ПРОЕКТА
+
+
+==================================================
+=== ФАЙЛ: .\.env ===
+==================================================
+
+BOT_TOKEN=8639223016:AAEpx93LwxcyYp3DvXQzOZas_8IDr8a29ro
+ADMIN_IDS=1713290400
+DB_NAME=claims.db
+SUPER_ADMIN_ID=1713290400
+
+
+==================================================
+=== ФАЙЛ: .\all_code.txt ===
+==================================================
+
+
+
+==================================================
+=== ФАЙЛ: .\bot_instance.py ===
+==================================================
+
+from aiogram import Bot
+from config import BOT_TOKEN
+
+# Создаем бота здесь, чтобы избежать циклического импорта
+bot = Bot(token=BOT_TOKEN)
+
+
+==================================================
+=== ФАЙЛ: .\config.py ===
+==================================================
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(",")))
+DB_NAME = os.getenv("DB_NAME", "claims.db")
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "1713290400"))
+
+
+==================================================
+=== ФАЙЛ: .\database.py ===
+==================================================
+
+import aiosqlite
+import csv
+import io
+from datetime import datetime
+from config import DB_NAME, ADMIN_IDS
+
+# ID супер-админов из .env (список)
+ENV_SUPER_ADMIN_IDS = ADMIN_IDS if ADMIN_IDS else []
+
+async def archive_old_claims(days: int = 365):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(f"""
+            INSERT INTO claims_archive SELECT * FROM claims 
+            WHERE date(created_at) < date('now', '-{days} days')
+        """)
+        await db.execute(f"""
+            DELETE FROM claims 
+            WHERE date(created_at) < date('now', '-{days} days')
+        """)
+        await db.commit()
+        cursor = await db.execute("SELECT changes()")
+        archived_count = (await cursor.fetchone())[0]
+        return archived_count
+
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                role TEXT DEFAULT 'user'
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                category TEXT,
+                sub_category TEXT,
+                brand TEXT,
+                defect_desc TEXT,
+                purchase_date TEXT,
+                client_wish TEXT,
+                photo_id TEXT,
+                status TEXT DEFAULT 'pending',
+                admin_comment TEXT,
+                admin_name TEXT,
+                client_name TEXT DEFAULT 'Не указано',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER,
+                action TEXT,
+                target_id INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS updates_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                update_type TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS claim_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_id INTEGER,
+                old_status TEXT,
+                new_status TEXT,
+                admin_id INTEGER,
+                admin_name TEXT,
+                comment TEXT,
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS claims_archive AS SELECT * FROM claims WHERE 1=0
+        """)
+        
+        # Авто-назначение супер-админов из .env
+        if ENV_SUPER_ADMIN_IDS:
+            for admin_id in ENV_SUPER_ADMIN_IDS:
+                await db.execute(
+                    "INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)",
+                    (admin_id, 'super_admin')
+                )
+        
+        await db.commit()
+
+async def get_user_role(user_id: int) -> str:
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
+        res = await cursor.fetchone()
+        return res[0] if res else 'user'
+
+async def set_user_role(user_id: int, role: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)",
+            (user_id, role)
+        )
+        await db.commit()
+
+async def log_action(admin_id: int, action: str, target_id: int = None):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO logs (admin_id, action, target_id) VALUES (?, ?, ?)",
+            (admin_id, action, target_id)
+        )
+        await db.commit()
+
+async def log_update(user_id: int, update_type: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO updates_log (user_id, update_type) VALUES (?, ?)",
+            (user_id, update_type)
+        )
+        await db.commit()
+
+async def create_claim(data: dict, user_id: int) -> int:
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            INSERT INTO claims (user_id, category, sub_category, brand, defect_desc, purchase_date, client_wish, photo_id, client_name) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, 
+            data['category'], 
+            data['sub_category'], 
+            data.get('brand'), 
+            data['defect'], 
+            data.get('date'), 
+            data.get('wish'), 
+            data['photo'], 
+            data.get('client_name', 'Не указано')
+        ))
+        await db.commit()
+        return cursor.lastrowid
+
+async def get_claim(claim_id: int):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row 
+        cursor = await db.execute("SELECT * FROM claims WHERE id = ?", (claim_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+async def update_claim_status(claim_id: int, status: str, comment: str = None, admin_name: str = None):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "UPDATE claims SET status = ?, admin_comment = ?, admin_name = ? WHERE id = ?",
+            (status, comment, admin_name, claim_id)
+        )
+        await db.commit()
+
+async def add_claim_history(claim_id: int, old_status: str, new_status: str, 
+                            admin_id: int, admin_name: str, comment: str = None):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+            INSERT INTO claim_history (claim_id, old_status, new_status, admin_id, admin_name, comment) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (claim_id, old_status, new_status, admin_id, admin_name, comment))
+        await db.commit()
+
+async def get_claim_history(claim_id: int):
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            SELECT old_status, new_status, admin_name, comment, changed_at 
+            FROM claim_history WHERE claim_id = ? ORDER BY changed_at DESC
+        """, (claim_id,))
+        return await cursor.fetchall()
+
+async def get_admins_by_role(role_prefix: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        if role_prefix == 'super_admin':
+            # Только супер-админы из БД + гарантированно из .env
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            rows = await cursor.fetchall()
+            db_admins = [row[0] for row in rows]
+            return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
+        
+        elif role_prefix in ('admin_tech', 'admin_acc'):
+            # Специфичные админы + супер-админы из БД + гарантированно из .env
+            cursor = await db.execute(
+                "SELECT user_id FROM users WHERE role = ? OR role = 'super_admin'",
+                (role_prefix,)
+            )
+            rows = await cursor.fetchall()
+            db_admins = [row[0] for row in rows]
+            return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
+        
+        else:
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = ?", (role_prefix,))
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+async def get_stats_overview():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor_total = await db.execute("SELECT COUNT(*) FROM claims")
+        total = (await cursor_total.fetchone())[0]
+        cursor_pending = await db.execute("SELECT COUNT(*) FROM claims WHERE status = 'pending'")
+        pending = (await cursor_pending.fetchone())[0]
+        cursor_resolved = await db.execute(
+            "SELECT COUNT(*) FROM claims WHERE status IN ('approved', 'rejected', 'repair', 'quality_check')"
+        )
+        resolved = (await cursor_resolved.fetchone())[0]
+        return {'total': total, 'pending': pending, 'resolved': resolved}
+
+async def get_stats_by_points():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT DISTINCT user_id FROM claims")
+        user_ids = [row[0] for row in await cursor.fetchall()]
+        stats_list = []
+        for uid in user_ids:
+            cursor_ptv = await db.execute(
+                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND sub_category = 'ПТВ'",
+                (uid,)
+            )
+            ptv = (await cursor_ptv.fetchone())[0]
+            cursor_new = await db.execute(
+                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND sub_category = 'Новое устройство'",
+                (uid,)
+            )
+            new_dev = (await cursor_new.fetchone())[0]
+            cursor_acc = await db.execute(
+                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND category = 'acc'",
+                (uid,)
+            )
+            acc = (await cursor_acc.fetchone())[0]
+            total = ptv + new_dev + acc
+            if total > 0:
+                stats_list.append({
+                    'user_id': uid,
+                    'name': f"ТТ #{uid}",
+                    'ptv': ptv,
+                    'new': new_dev,
+                    'acc': acc,
+                    'total': total
+                })
+        stats_list.sort(key=lambda x: x['total'], reverse=True)
+        return stats_list
+
+async def get_pending_claims():
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            SELECT id, user_id, category, sub_category, created_at 
+            FROM claims 
+            WHERE status = 'pending' AND (julianday('now') - julianday(created_at)) * 24 > 2 
+            ORDER BY created_at ASC
+        """)
+        return await cursor.fetchall()
+
+async def export_stats_to_csv() -> bytes:
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            SELECT id, user_id, category, sub_category, brand, defect_desc, purchase_date, client_wish, status, admin_name, client_name, created_at 
+            FROM claims ORDER BY created_at DESC
+        """)
+        rows = await cursor.fetchall()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            'ID', 'User ID', 'Категория', 'Подкатегория', 'Бренд', 'Дефект', 
+            'Дата покупки', 'Пожелание клиента', 'Статус', 'Админ', 'Клиент', 'Дата создания'
+        ])
+        for row in rows:
+            writer.writerow(row)
+        return output.getvalue().encode('utf-8-sig')
+
+
+==================================================
+=== ФАЙЛ: .\filters.py ===
+==================================================
+
+from aiogram import BaseFilter
+from aiogram.types import Message, CallbackQuery
+from database import get_user_role
+
+class IsSuperAdmin(BaseFilter):
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        user_id = event.from_user.id
+        role = await get_user_role(user_id)
+        return role == 'super_admin'
+
+class IsTechAdmin(BaseFilter):
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        user_id = event.from_user.id
+        role = await get_user_role(user_id)
+        return role in ['super_admin', 'admin_tech']
+
+class IsAccAdmin(BaseFilter):
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        user_id = event.from_user.id
+        role = await get_user_role(user_id)
+        return role in ['super_admin', 'admin_acc']
+
+
+==================================================
+=== ФАЙЛ: .\keyboards.py ===
+==================================================
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+
+def get_main_menu():
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Техника"), KeyboardButton(text="🎧 Аксессуар")]
+        ],
+        resize_keyboard=True
+    )
+    return kb
+
+def get_cancel_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True
+    )
+
+def get_acc_types():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Стекло", callback_data="acc_glass"), InlineKeyboardButton(text="СЗУ", callback_data="acc_charger")],
+        [InlineKeyboardButton(text="Кабель", callback_data="acc_cable"), InlineKeyboardButton(text="Другое", callback_data="acc_other")]
+    ])
+    return kb
+
+def get_tech_type_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛠 ПТВ", callback_data="tech_ptv")],
+        [InlineKeyboardButton(text="🆕 Новое устройство", callback_data="tech_new")]
+    ])
+    return kb
+
+def get_mp_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да", callback_data="mp_yes")],
+        [InlineKeyboardButton(text="Нет", callback_data="mp_no")]
+    ])
+    return kb
+
+def get_wish_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Возврат", callback_data="wish_return"), InlineKeyboardButton(text="Обмен", callback_data="wish_exchange")]
+    ])
+    return kb
+
+def get_admin_decision(claim_id: int):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"adm_approve_{claim_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_reject_{claim_id}")]
+    ])
+    return kb
+
+def get_super_admin_menu():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👮 Назначить админа", callback_data="sa_add_admin_menu")],
+        [InlineKeyboardButton(text="🗑 Удалить админа", callback_data="sa_del_admin_menu")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="sa_stats_menu")]
+    ])
+    return kb
+
+def get_role_selection_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛠 Техника (admin_tech)", callback_data="role_tech")],
+        [InlineKeyboardButton(text="🎧 Аксессуары (admin_acc)", callback_data="role_acc")],
+        [InlineKeyboardButton(text="👑 Супер-админ (super_admin)", callback_data="role_super")]
+    ])
+    return kb
+
+def get_stats_menu():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Общая статистика", callback_data="stats_overview")],
+        [InlineKeyboardButton(text="🏢 Подробно по ТТ", callback_data="stats_points")],
+        [InlineKeyboardButton(text="⏳ Просроченные заявки", callback_data="stats_pending")],
+        [InlineKeyboardButton(text="📥 Экспорт в CSV", callback_data="stats_export")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin")]
+    ])
+    return kb
+
+def get_stats_pagination(page: int, total_pages: int):
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"stats_page_{page-1}"))
+    buttons.append(InlineKeyboardButton(text=f"{page+1}/{total_pages}", callback_data="stats_current"))
+    if page < total_pages - 1:
+        buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"stats_page_{page+1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        buttons,
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="sa_stats_menu")]
+    ])
+
+def get_warranty_status_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📸 Прикрепить фото талона", callback_data="warranty_photo")],
+        [InlineKeyboardButton(text="❌ Талон утерян", callback_data="warranty_lost")]
+    ])
+    return kb
+
+def get_back_to_admin():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ В меню админа", callback_data="back_to_admin")]
+    ])
+    return kb
+
+
+==================================================
+=== ФАЙЛ: .\main.py ===
+==================================================
+
+import asyncio
+import logging
+from aiogram import Dispatcher
+from bot_instance import bot
+from database import init_db, archive_old_claims
+from middlewares import UpdatesLoggingMiddleware
+from handlers.common import router as common_router
+from handlers.accessories import router as acc_router
+from handlers.technics import router as tech_router
+from handlers.admin import router as admin_router
+from handlers.super_admin import router as super_admin_router
+
+logging.basicConfig(level=logging.INFO)
+dp = Dispatcher()
+
+dp.update.middleware(UpdatesLoggingMiddleware())
+
+dp.include_router(common_router)
+dp.include_router(acc_router)
+dp.include_router(tech_router)
+dp.include_router(admin_router)
+dp.include_router(super_admin_router)
+
+async def scheduler_task():
+    while True:
+        try:
+            archived = await archive_old_claims(days=365)
+            if archived > 0:
+                logging.info(f"Архивировано {archived} старых заявок")
+        except Exception as e:
+            logging.error(f"Ошибка архивации: {e}")
+        await asyncio.sleep(86400)
+
+async def main():
+    await init_db()
+    asyncio.create_task(scheduler_task())
+    logging.info("🚀 Бот запущен...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("🛑 Бот остановлен")
+
+
+==================================================
+=== ФАЙЛ: .\middlewares.py ===
+==================================================
+
+import logging
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject
+from typing import Callable, Dict, Any, Awaitable
+from database import log_update
+
+logger = logging.getLogger(__name__)
+
+class UpdatesLoggingMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any]
+    ) -> Any:
+        user = data.get("event_from_user")
+        if user:
+            update_type = event.__class__.__name__
+            try:
+                await log_update(user.id, update_type)
+            except Exception as e:
+                logger.error(f"Failed to log update: {e}")
+        return await handler(event, data)
+
+
+==================================================
+=== ФАЙЛ: .\pack_code.py ===
+==================================================
+
+import os
+
+# Имя выходного файла
+output_file = "all_code.txt"
+
+# Папки, которые нужно игнорировать (чтобы не тащить мусор)
+exclude_dirs = ['venv', '__pycache__', '.git', '.idea', 'build', 'dist']
+
+# Какие расширения файлов собирать
+extensions = ['.py', '.env', '.txt', '.md', '.json', '.yaml', '.yml']
+
+print(f"🔍 Начинаю сборку кода из папки: {os.getcwd()}...")
+
+with open(output_file, 'w', encoding='utf-8') as outfile:
+    outfile.write("# СОБРАННЫЙ КОД ПРОЕКТА\n\n")
+    
+    # Проход по всем папкам и файлам
+    for root, dirs, files in os.walk('.'):
+        # Убираем лишние папки из обхода
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        
+        for file in files:
+            # Проверка расширения
+            if any(file.endswith(ext) for ext in extensions):
+                filepath = os.path.join(root, file)
+                
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Запись разделителя и имени файла
+                    outfile.write(f"\n{'='*50}\n")
+                    outfile.write(f"=== ФАЙЛ: {filepath} ===\n")
+                    outfile.write(f"{'='*50}\n\n")
+                    # Запись содержимого
+                    outfile.write(content)
+                    outfile.write("\n")
+                    print(f"✅ Добавлен: {filepath}")
+                except Exception as e:
+                    print(f"⚠️ Ошибка чтения {filepath}: {e}")
+
+print(f"\n🎉 ГОТОВО! Весь код собран в файл: {os.path.abspath(output_file)}")
+print("Откройте этот файл, скопируйте всё содержимое и отправьте в чат.")
+
+
+==================================================
+=== ФАЙЛ: .\requirements.txt ===
+==================================================
+
+aiogram==3.4.1
+aiosqlite==0.19.0
+python-dotenv==1.0.1
+
+
+==================================================
+=== ФАЙЛ: .\states.py ===
+==================================================
+
+# states.py
+from aiogram.fsm.state import State, StatesGroup
+
+class AccState(StatesGroup):
+    # Убрали type_choice, теперь сразу переходим к данным
+    client_name = State()
+    nomenclature = State()
+    date = State()
+    photo = State()
+    defect = State()
+    wish = State()
+
+class TechState(StatesGroup):
+    type_choice = State()
+    ptv_defect = State()
+    ptv_mp_check = State()
+    ptv_date = State()
+    ptv_client_name = State()
+    ptv_photo_front = State()
+    ptv_photo_back = State()
+    ptv_warranty_choice = State()
+    ptv_photo_warranty = State()
+    new_device_name = State()
+    new_defect = State()
+    new_date = State()
+    new_client_name = State()
+    new_photo_front = State()
+    new_photo_back = State()
+    new_warranty_choice = State()
+    new_photo_warranty = State()
+
+class AdminActionFSM(StatesGroup):
+    reject_comment = State()
+
+class SuperAdminFSM(StatesGroup):
+    waiting_for_id = State()
+    waiting_for_id_delete = State()
+
+
+==================================================
+=== ФАЙЛ: .\handlers\accessories.py ===
+==================================================
+
+# handlers/accessories.py
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from database import create_claim, get_admins_by_role
+from keyboards import get_wish_buttons, get_admin_decision
+from states import AccState
+from bot_instance import bot
+
+router = Router()
+
+WISH_NAMES = {
+    "wish_return": "Возврат",
+    "wish_exchange": "Обмен"
+}
+
+
+def back_btn(target_state: AccState) -> InlineKeyboardButton:
+    """Кнопка Назад к указанному состоянию."""
+    return InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data=f"acc_back_{target_state.state}"
+    )
+
+
+# ---------------------------------------------------------
+# ОБРАБОТЧИК КНОПКИ "НАЗАД"
+# ---------------------------------------------------------
+@router.callback_query(F.data.startswith("acc_back_"))
+async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
+    callback_state = cb.data.replace("acc_back_", "")
+    
+    state_map = {
+        AccState.client_name.state: AccState.client_name,
+        AccState.nomenclature.state: AccState.nomenclature,
+        AccState.date.state: AccState.date,
+        AccState.photo.state: AccState.photo,
+        AccState.defect.state: AccState.defect,
+    }
+    
+    target_state = state_map.get(callback_state)
+    if not target_state:
+        await cb.answer("Ошибка навигации", show_alert=True)
+        return
+
+    try:
+        await cb.message.delete()
+    except:
+        pass
+
+    if target_state == AccState.client_name:
+        await cb.message.answer("👤 Укажите своё имя и фамилию:")
+        await state.set_state(AccState.client_name)
+    
+    elif target_state == AccState.nomenclature:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.client_name)]])
+        await cb.message.answer(
+            "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):",
+            reply_markup=kb
+        )
+        await state.set_state(AccState.nomenclature)
+    
+    elif target_state == AccState.date:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.nomenclature)]])
+        await cb.message.answer(
+            "📅 Укажите дату продажи в формате ДД.ММ.ГГГГ (например: 25.10.2023):",
+            reply_markup=kb
+        )
+        await state.set_state(AccState.date)
+    
+    elif target_state == AccState.photo:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.date)]])
+        await cb.message.answer(
+            "📸 Отправьте фото упаковки товара (обязательно):",
+            reply_markup=kb
+        )
+        await state.set_state(AccState.photo)
+    
+    elif target_state == AccState.defect:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.photo)]])
+        await cb.message.answer(
+            "📝 Опишите дефект со слов клиента:",
+            reply_markup=kb
+        )
+        await state.set_state(AccState.defect)
+
+    await cb.answer("Вернулись на шаг назад")
+
+
+# ---------------------------------------------------------
+# ОСНОВНАЯ ЛОГИКА ЗАЯВКИ
+# ---------------------------------------------------------
+
+@router.message(F.text == "🎧 Аксессуар")
+async def acc_start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("👤 Укажите своё имя и фамилию:")
+    await state.set_state(AccState.client_name)
+
+
+@router.message(AccState.client_name)
+async def acc_client_name_received(message: Message, state: FSMContext):
+    client_name = message.text.strip()
+    if not client_name:
+        await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:")
+        return
+    
+    await state.update_data(client_name=client_name)
+    # Первый шаг — без кнопки Назад
+    await message.answer(
+        "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):"
+    )
+    await state.set_state(AccState.nomenclature)
+
+
+@router.message(AccState.nomenclature)
+async def acc_nomenclature_received(message: Message, state: FSMContext):
+    nomenclature = message.text.strip()
+    if not nomenclature:
+        await message.answer("⚠️ Номенклатура не может быть пустой. Повторите ввод:")
+        return
+    
+    await state.update_data(nomenclature=nomenclature)
+    
+    # Сообщение про ДАТУ → Назад к НОМЕНКЛАТУРЕ
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.nomenclature)]])
+    await message.answer(
+        "📅 Укажите дату продажи в формате ДД.ММ.ГГГГ (например: 25.10.2023):",
+        reply_markup=kb
+    )
+    await state.set_state(AccState.date)
+
+
+@router.message(AccState.date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def acc_date_valid(message: Message, state: FSMContext):
+    await state.update_data(date=message.text)
+    
+    # Сообщение про ФОТО → Назад к ДАТЕ
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.date)]])
+    await message.answer(
+        "📸 Отправьте фото упаковки товара (обязательно):",
+        reply_markup=kb
+    )
+    await state.set_state(AccState.photo)
+
+
+@router.message(AccState.date)
+async def acc_date_invalid(message: Message):
+    await message.answer(
+        "⚠️ Неверный формат даты!\nПожалуйста, введите дату ТОЛЬКО в формате ДД.ММ.ГГГГ:"
+    )
+
+
+@router.message(AccState.photo, F.photo)
+async def acc_photo_received(message: Message, state: FSMContext):
+    await state.update_data(photo=message.photo[-1].file_id)
+    
+    # Сообщение про ДЕФЕКТ → Назад к ФОТО
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.photo)]])
+    await message.answer(
+        "📝 Опишите дефект со слов клиента:",
+        reply_markup=kb
+    )
+    await state.set_state(AccState.defect)
+
+
+@router.message(AccState.photo)
+async def acc_photo_not_received(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото упаковки:")
+
+
+@router.message(AccState.defect)
+async def acc_defect_received(message: Message, state: FSMContext):
+    defect = message.text.strip()
+    if not defect:
+        await message.answer("⚠️ Описание дефекта не может быть пустым. Повторите ввод:")
+        return
+    
+    await state.update_data(defect=defect)
+    
+    # Сообщение про ЖЕЛАНИЕ → Назад к ДЕФЕКТУ
+    wish_kb = get_wish_buttons()
+    wish_kb.inline_keyboard.append([back_btn(AccState.defect)])
+    
+    await message.answer(
+        "💬 Что требует клиент?",
+        reply_markup=wish_kb
+    )
+    await state.set_state(AccState.wish)
+
+
+@router.callback_query(F.data.startswith("wish_"), AccState.wish)
+async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(wish=cb.data)
+    
+    data = await state.get_data()
+    photo_id = data['photo']
+    client_name = data.get('client_name', 'Не указано')
+    nomenclature = data.get('nomenclature', 'Не указано')
+    date_sale = data.get('date', 'Не указано')
+    defect = data.get('defect', 'Не указано')
+    wish_key = data.get('wish', 'Не указано')
+    wish_ru = WISH_NAMES.get(wish_key, wish_key)
+
+    claim_data = {
+        'category': 'acc',
+        'sub_category': 'Аксессуар',
+        'brand': nomenclature,
+        'defect': defect,
+        'purchase_date': date_sale,
+        'client_wish': wish_ru,
+        'photo': photo_id,
+        'client_name': client_name
+    }
+
+    try:
+        claim_id = await create_claim(claim_data, cb.from_user.id)
+    except Exception as e:
+        await cb.message.answer("❌ Ошибка сохранения заявки. Попробуйте позже.")
+        await state.clear()
+        return
+
+    await state.clear()
+    await cb.message.answer(f"✅ Заявка #{claim_id} (Аксессуар) создана!", parse_mode="Markdown")
+
+    target_admins = await get_admins_by_role('admin_acc')
+    if not target_admins:
+        await cb.message.answer("⚠️ Ошибка системы: нет администраторов для обработки заявки.")
+        return
+
+    tt_link = f"tg://user?id={cb.from_user.id}"
+    tt_display = f"[{cb.from_user.full_name}]({tt_link})"
+    
+    caption = (
+        f"🆕 **НОВАЯ ЗАЯВКА (Аксессуар) #{claim_id}**\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 **ТТ:** {tt_display}\n"
+        f"👤 **Сотрудник:** {client_name}\n"
+        f"📦 **Номенклатура:** {nomenclature}\n"
+        f"📅 **Дата продажи:** {date_sale}\n"
+        f"📝 **Дефект:** {defect}\n"
+        f"💬 **Требование клиента:** {wish_ru}\n\n"
+    )
+    
+    keyboard = get_admin_decision(claim_id)
+
+    for admin_id in target_admins:
+        try:
+            await bot.send_photo(
+                chat_id=admin_id,
+                photo=photo_id,
+                caption=caption,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            print(f"Ошибка отправки заявки #{claim_id} админу {admin_id}: {e}")
+
+
+==================================================
+=== ФАЙЛ: .\handlers\admin.py ===
+==================================================
+
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+from database import get_user_role, update_claim_status, get_claim, log_action, set_user_role, add_claim_history
+from keyboards import get_super_admin_menu, get_role_selection_buttons
+from bot_instance import bot
+from states import AdminActionFSM, SuperAdminFSM
+
+router = Router()
+
+@router.callback_query(F.data.startswith("adm_approve_"))
+async def admin_approve(cb: CallbackQuery):
+    try:
+        claim_id = int(cb.data.split("_")[-1])
+        full_name = cb.from_user.full_name or "Админ"
+        
+        claim = await get_claim(claim_id)
+        old_status = claim.get('status') if claim else "pending"
+        
+        await update_claim_status(claim_id, 'approved', admin_name=full_name)
+        await add_claim_history(claim_id, old_status, 'approved', cb.from_user.id, full_name)
+        await log_action(cb.from_user.id, 'approve', claim_id)
+        
+        new_caption = f"{cb.message.caption}\n\n✅ **ОДОБРЕНО** (Админ: {full_name})"
+        await cb.message.edit_caption(caption=new_caption, parse_mode="Markdown")
+        
+        if claim:
+            user_id = claim.get('user_id')
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ Ваша заявка #{claim_id} одобрена!\n"
+                    f"Решение принял: {full_name}\n\n"
+                    f"⚠️ Если возвращённый товар непригоден для продажи "
+                    f"(не работает, сломан, разбит и т.д.), его необходимо отбраковать и приложить номер заявки к накладной."
+                )
+            except: pass
+    except Exception as e:
+        print(f"Ошибка при одобрении: {e}")
+        await cb.answer("Произошла ошибка при обработке.")
+
+@router.callback_query(F.data.startswith("adm_reject_"))
+async def admin_reject_start(cb: CallbackQuery, state: FSMContext):
+    claim_id = int(cb.data.split("_")[-1])
+    await state.update_data(reject_claim_id=claim_id)
+    await cb.message.answer("📝 Введите причину отказа:")
+    await state.set_state(AdminActionFSM.reject_comment)
+
+@router.message(AdminActionFSM.reject_comment)
+async def admin_reject_finish(message: Message, state: FSMContext):
+    data = await state.get_data()
+    claim_id = data.get('reject_claim_id')
+    if not claim_id:
+        await message.answer("❌ Ошибка: ID заявки не найден.")
+        await state.clear()
+        return
+    
+    comment = message.text
+    full_name = message.from_user.full_name or "Админ"
+    
+    claim = await get_claim(claim_id)
+    old_status = claim.get('status') if claim else "pending"
+    
+    await update_claim_status(claim_id, 'rejected', comment=comment, admin_name=full_name)
+    await add_claim_history(claim_id, old_status, 'rejected', message.from_user.id, full_name, comment)
+    await log_action(message.from_user.id, 'reject', claim_id)
+    await state.clear()
+    await message.answer("✅ Заявка отклонена, сотрудник уведомлен.")
+    
+    if claim:
+        user_id = claim.get('user_id')
+        try:
+            await bot.send_message(
+                user_id,
+                f"❌ Заявка #{claim_id} отклонена.\nПричина: {comment}\nРешение принял: {full_name}"
+            )
+        except: pass
+
+@router.callback_query(F.data.startswith("adm_ptv_return_"))
+async def admin_ptv_return(cb: CallbackQuery):
+    try:
+        claim_id = int(cb.data.split("_")[-1])
+        full_name = cb.from_user.full_name or "Админ"
+        
+        claim = await get_claim(claim_id)
+        old_status = claim.get('status') if claim else "pending"
+        
+        await update_claim_status(claim_id, 'approved', admin_name=full_name, comment="Возврат/Обмен разрешен")
+        await add_claim_history(claim_id, old_status, 'approved', cb.from_user.id, full_name, "Возврат/Обмен разрешен")
+        await log_action(cb.from_user.id, 'ptv_return', claim_id)
+        
+        current_text = cb.message.text or "Выберите решение по заявке:"
+        new_text = (
+            f"{current_text}\n\n"
+            f"✅ **РЕШЕНИЕ ПРИНЯТО:**\n"
+            f"Разрешен **ОБМЕН**.\n"
+            f"(В случае отказа клиента — **ВОЗВРАТ**)\n\n"
+            f"Решение принял: {full_name}"
+        )
+        await cb.message.edit_text(text=new_text, parse_mode="Markdown", reply_markup=None)
+        
+        if claim:
+            user_id = claim.get('user_id')
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ **Решение по заявке #{claim_id}:**\n\n"
+                    f"Разрешен **ОБМЕН**.\n"
+                    f"В случае отказа клиента от обмена, разрешен **ВОЗВРАТ**.\n\n"
+                    f"Решение принял: {full_name}"
+                )
+            except: pass
+        await cb.answer("Решение принято: Возврат/Обмен")
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        await cb.answer("Ошибка обработки")
+
+@router.callback_query(F.data.startswith("adm_ptv_repair_"))
+async def admin_ptv_repair(cb: CallbackQuery):
+    try:
+        claim_id = int(cb.data.split("_")[-1])
+        full_name = cb.from_user.full_name or "Админ"
+        
+        claim = await get_claim(claim_id)
+        old_status = claim.get('status') if claim else "pending"
+        
+        await update_claim_status(claim_id, 'approved', admin_name=full_name, comment="Гарантийное обслуживание")
+        await add_claim_history(claim_id, old_status, 'approved', cb.from_user.id, full_name, "Гарантийное обслуживание")
+        await log_action(cb.from_user.id, 'ptv_repair', claim_id)
+        
+        current_text = cb.message.text or "Выберите решение по заявке:"
+        new_text = (
+            f"{current_text}\n\n"
+            f"✅ **РЕШЕНИЕ ПРИНЯТО:**\n"
+            f"Технику необходимо принять на **Гарантийное обслуживание**.\n\n"
+            f"Решение принял: {full_name}"
+        )
+        await cb.message.edit_text(text=new_text, parse_mode="Markdown", reply_markup=None)
+        
+        if claim:
+            user_id = claim.get('user_id')
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ **Решение по заявке #{claim_id}:**\n\n"
+                    f"Технику необходимо принять на **Гарантийное обслуживание**.\n\n"
+                    f"Решение принял: {full_name}"
+                )
+            except: pass
+        await cb.answer("Решение принято: Гарантийное обслуживание")
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        await cb.answer("Ошибка обработки")
+
+@router.message(F.text == "/admin_panel")
+async def admin_panel(message: Message):
+    user_id = message.from_user.id
+    role = await get_user_role(user_id)
+    
+    if role == 'super_admin':
+        await message.answer("🛡 Панель супер-админа:", reply_markup=get_super_admin_menu())
+    else:
+        await message.answer("⛔ Доступ запрещен.")
+
+@router.callback_query(F.data == "sa_add_admin_menu")
+async def sa_add_menu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text(
+        "👮 **Назначение админа**\n\n"
+        "1. Введите ID пользователя в чат.\n"
+        "2. Выберите роль кнопками ниже.",
+        reply_markup=get_role_selection_buttons(),
+        parse_mode="Markdown"
+    )
+    await state.set_state(SuperAdminFSM.waiting_for_id)
+
+@router.message(SuperAdminFSM.waiting_for_id)
+async def sa_receive_id(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.")
+        return
+    await state.update_data(target_id=int(text))
+    await message.answer("✅ ID принят. Выберите роль:", reply_markup=get_role_selection_buttons())
+
+@router.callback_query(F.data.startswith("role_"))
+async def sa_assign_role(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    target_id = data.get('target_id')
+    if not target_id:
+        await cb.answer("Ошибка: ID не найден. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+    
+    role_map = {
+        "role_tech": "admin_tech",
+        "role_acc": "admin_acc",
+        "role_super": "super_admin"
+    }
+    new_role = role_map.get(cb.data)
+    if not new_role:
+        await cb.answer("Ошибка роли.", show_alert=True)
+        return
+    
+    try:
+        await set_user_role(target_id, new_role)
+        await log_action(cb.from_user.id, 'assign_role', target_id)
+        role_names = {
+            "admin_tech": "Техника",
+            "admin_acc": "Аксессуары",
+            "super_admin": "Супер-админ"
+        }
+        await cb.message.edit_text(
+            f"✅ **Админ назначен!**\n\n"
+            f"🆔 ID: `{target_id}`\n"
+            f"🛡 Роль: **{role_names[new_role]}**",
+            reply_markup=get_super_admin_menu(),
+            parse_mode="Markdown"
+        )
+        await state.clear()
+        try:
+            await bot.send_message(
+                target_id,
+                f"🎉 Вы назначены администратором ({role_names[new_role]}) в боте."
+            )
+        except: pass
+    except Exception as e:
+        await cb.answer(f"Ошибка: {e}", show_alert=True)
+
+@router.callback_query(F.data == "sa_del_admin_menu")
+async def sa_del_menu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await cb.message.edit_text(
+        "🗑 **Удаление админа**\n\nВведите ID пользователя, которого нужно лишить прав."
+    )
+    await state.set_state(SuperAdminFSM.waiting_for_id_delete)
+
+@router.message(SuperAdminFSM.waiting_for_id_delete)
+async def sa_del_admin_finish(message: Message, state: FSMContext):
+    await state.clear()
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("❌ ID должен быть числом.")
+        return
+    uid = int(text)
+    current_role = await get_user_role(uid)
+    if current_role == 'user':
+        await message.answer(f"ℹ️ Пользователь {uid} уже не является администратором.")
+        return
+    await set_user_role(uid, 'user')
+    await log_action(message.from_user.id, 'del_admin', uid)
+    await message.answer(
+        f"✅ Пользователь {uid} лишен прав.",
+        reply_markup=get_super_admin_menu()
+    )
+    try:
+        await bot.send_message(uid, "⚠️ Ваши права администратора сняты.")
+    except: pass
+
+
+==================================================
+=== ФАЙЛ: .\handlers\common.py ===
+==================================================
+
+from aiogram import Router, F
+from aiogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
+from aiogram.fsm.context import FSMContext
+from database import get_user_role, set_user_role, get_claim
+from keyboards import get_main_menu, get_tech_type_buttons
+from states import TechState, AccState
+
+router = Router()
+
+@router.message(F.text == "/start")
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    user_id = message.from_user.id
+    current_role = await get_user_role(user_id)
+    
+    # Защита: не сбрасываем админские роли
+    if current_role in ('super_admin', 'admin_tech', 'admin_acc'):
+        role = current_role
+    elif current_role == 'user' or current_role is None:
+        await set_user_role(user_id, 'user')
+        role = 'user'
+    else:
+        role = current_role
+    
+    text = "Привет! Я бот для приема рекламаций.\nВыберите категорию ниже."
+    if role != 'user':
+        role_names = {
+            'admin_tech': 'Техника',
+            'admin_acc': 'Аксессуары',
+            'super_admin': 'Супер-админ'
+        }
+        role_display = role_names.get(role, role)
+        text += f"\n\n🛡 Ваша роль: **{role_display}**"
+    
+    await message.answer(text, reply_markup=get_main_menu())
+
+@router.message(F.text == "/cancel")
+@router.message(F.text == "❌ Отмена")
+async def cmd_cancel(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активной операции для отмены.", reply_markup=get_main_menu())
+        return
+    await state.clear()
+    await message.answer(
+        "❌ Операция отменена.\n\nВыберите категорию:",
+        reply_markup=get_main_menu()
+    )
+
+@router.message(F.text == "📱 Техника")
+async def tech_start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Выберите тип обращения:", reply_markup=get_tech_type_buttons())
+    await state.set_state(TechState.type_choice)
+
+@router.inline_query(F.query.regexp(r'^\d+$'))
+async def inline_search_claim(inline_query: InlineQuery):
+    user_id = inline_query.from_user.id
+    role = await get_user_role(user_id)
+
+    if role not in ['admin_tech', 'admin_acc', 'super_admin']:
+        await inline_query.answer(
+            results=[],
+            switch_pm_text="🔒 Доступ только для администраторов",
+            switch_pm_parameter="access_denied",
+            cache_time=0
+        )
+        return
+
+    try:
+        claim_id = int(inline_query.query)
+    except ValueError:
+        await inline_query.answer(
+            results=[],
+            switch_pm_text="Введите только номер заявки",
+            switch_pm_parameter="invalid_id",
+            cache_time=0
+        )
+        return
+
+    claim = await get_claim(claim_id)
+    if not claim:
+        await inline_query.answer(
+            results=[],
+            switch_pm_text="Заявка не найдена",
+            switch_pm_parameter="notfound",
+            cache_time=5
+        )
+        return
+
+    c_id = claim.get('id')
+    c_category = claim.get('category')
+    c_defect = claim.get('defect_desc')
+    c_purchase_date = claim.get('purchase_date')
+    c_client_wish = claim.get('client_wish')
+    c_status = claim.get('status')
+    c_admin_name = claim.get('admin_name')
+    c_admin_comment = claim.get('admin_comment')
+    c_client_name = claim.get('client_name')
+    c_created_at = claim.get('created_at')
+
+    access_denied = False
+    if role == 'admin_tech' and c_category != 'tech':
+        access_denied = True
+    elif role == 'admin_acc' and c_category != 'acc':
+        access_denied = True
+
+    if access_denied:
+        await inline_query.answer(
+            results=[],
+            switch_pm_text="🚫 У вас нет доступа к этой категории",
+            switch_pm_parameter="category_denied",
+            cache_time=0
+        )
+        return
+
+    category_ru = "Техника" if c_category == 'tech' else "Аксессуар"
+
+    status_map = {
+        'pending': 'Ожидает решения',
+        'approved': 'Одобрено',
+        'rejected': 'Отклонено',
+        'repair': 'Гарантийный ремонт',
+        'quality_check': 'Проверка качества',
+        'expired': 'Гарантия истекла',
+        'error_date': 'Ошибка даты'
+    }
+    status_ru = status_map.get(c_status, c_status)
+
+    emoji_map = {
+        'pending': '⏳',
+        'approved': '✅',
+        'rejected': '❌',
+        'repair': '🔧',
+        'quality_check': '📋',
+        'expired': '⚠️',
+        'error_date': '❓'
+    }
+    status_emoji = emoji_map.get(c_status, '❓')
+
+    defect_text = c_defect if c_defect else "Не указано"
+    date_text = c_purchase_date if c_purchase_date else "Не указана"
+    wish_text = c_client_wish if c_client_wish else "Не указано"
+    admin_text = c_admin_name if c_admin_name else "Не назначен"
+    comment_text = c_admin_comment if c_admin_comment else "—"
+    client_text = c_client_name if c_client_name else "Не указано"
+    created_text = c_created_at if c_created_at else "Не указано"
+
+    result_text = (
+        f"📋 **Заявка #{c_id}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏷 **Категория:** {category_ru}\n"
+        f"👤 **Сотрудник:** {client_text}\n"
+        f"📝 **Дефект:**\n_{defect_text}_\n"
+        f"📅 **Дата покупки:** {date_text}\n"
+        f"💬 **Пожелание:** {wish_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 **Решение:** {status_emoji} {status_ru}\n"
+        f"👨‍💼 **Ответственный:** {admin_text}\n"
+        f"💬 **Комментарий:** {comment_text}\n"
+    )
+
+    result = InlineQueryResultArticle(
+        id=str(c_id),
+        title=f"Заявка #{c_id} — {category_ru}",
+        description=f"{client_text} | {status_ru}",
+        input_message_content=InputTextMessageContent(
+            message_text=result_text,
+            parse_mode="Markdown"
+        )
+    )
+
+    await inline_query.answer(
+        results=[result],
+        cache_time=5,
+        is_personal=True
+    )
+
+
+==================================================
+=== ФАЙЛ: .\handlers\super_admin.py ===
+==================================================
+
+from aiogram import Router, F
+from aiogram.types import CallbackQuery, BufferedInputFile
+from aiogram.fsm.context import FSMContext
+from database import get_stats_overview, get_stats_by_points, get_pending_claims, export_stats_to_csv
+from keyboards import get_stats_menu, get_super_admin_menu, get_stats_pagination
+from bot_instance import bot
+from datetime import datetime
+
+router = Router()
+
+ITEMS_PER_PAGE = 10
+
+@router.callback_query(F.data == "sa_stats_menu")
+async def sa_stats_menu(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "📊 **Статистика системы**\n\nВыберите раздел:",
+        reply_markup=get_stats_menu(),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "stats_overview")
+async def stats_overview(cb: CallbackQuery):
+    stats = await get_stats_overview()
+    text = (
+        f"📈 **Общая статистика**\n\n"
+        f"🔢 Всего заявок: {stats['total']}\n"
+        f"⏳ В ожидании: {stats['pending']}\n"
+        f"✅ Решено: {stats['resolved']}"
+    )
+    await cb.message.edit_text(text, reply_markup=get_stats_menu(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "stats_points")
+async def stats_points(cb: CallbackQuery):
+    await show_stats_page(cb, 0)
+
+@router.callback_query(F.data.startswith("stats_page_"))
+async def stats_page_navigate(cb: CallbackQuery):
+    page = int(cb.data.split("_")[-1])
+    await show_stats_page(cb, page)
+
+async def show_stats_page(cb: CallbackQuery, page: int):
+    points_data = await get_stats_by_points()
+    if not points_data:
+        await cb.message.edit_text(
+            "🏢 **Статистика по торговым точкам**\n\nПока нет данных.",
+            reply_markup=get_stats_menu(),
+            parse_mode="Markdown"
+        )
+        return
+    
+    total_pages = (len(points_data) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    page = max(0, min(page, total_pages - 1))
+    
+    start_idx = page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    page_data = points_data[start_idx:end_idx]
+    
+    text = f"🏢 **Статистика по торговым точкам** (стр. {page+1}/{total_pages})\n\n"
+    for i, point in enumerate(page_data, start_idx + 1):
+        text += (
+            f"{i}. **{point['name']}**\n"
+            f" 🛠 ПТВ: {point['ptv']} | 🆕 Новое: {point['new']} | 🎧 Акс: {point['acc']}\n"
+            f" 🔢 **Всего:** {point['total']}\n\n"
+        )
+    
+    await cb.message.edit_text(
+        text,
+        reply_markup=get_stats_pagination(page, total_pages),
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data == "stats_pending")
+async def stats_pending(cb: CallbackQuery):
+    pending = await get_pending_claims()
+    if not pending:
+        text = "✅ Нет просроченных заявок (старше 2 часов)."
+    else:
+        text = "⏳ **Просроченные заявки (без ответа > 2ч):**\n\n"
+        for pid, uid, cat, sub, created in pending:
+            text += f"🆔 #{pid} | ТТ: {uid} | {cat}/{sub}\n 🕒 Создана: {created}\n\n"
+    await cb.message.edit_text(text, reply_markup=get_stats_menu(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "stats_export")
+async def stats_export(cb: CallbackQuery):
+    await cb.answer("⏳ Формирую отчёт...")
+    
+    try:
+        csv_data = await export_stats_to_csv()
+        file = BufferedInputFile(
+            file=csv_data,
+            filename=f"stats_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        )
+        await cb.message.answer_document(
+            document=file,
+            caption="📊 Экспорт статистики заявок",
+            reply_markup=get_stats_menu()
+        )
+    except Exception as e:
+        await cb.message.answer(f"❌ Ошибка экспорта: {e}", reply_markup=get_stats_menu())
+
+@router.callback_query(F.data == "back_to_admin")
+async def back_to_admin(cb: CallbackQuery):
+    await cb.message.edit_text(
+        "🛡 **Панель Супер-админа**\n\nВыберите действие:",
+        reply_markup=get_super_admin_menu(),
+        parse_mode="Markdown"
+    )
+
+
+==================================================
+=== ФАЙЛ: .\handlers\technics.py ===
+==================================================
+
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.fsm.context import FSMContext
+from database import create_claim, get_admins_by_role, update_claim_status
+from keyboards import get_mp_buttons, get_warranty_status_buttons
+from states import TechState
+from bot_instance import bot
+from datetime import datetime, date
+
+router = Router()
+
+@router.callback_query(F.data == "tech_ptv")
+async def tech_ptv_start(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.update_data(category_type="ptv")
+    await cb.message.answer("📝 Опишите дефект со слов клиента:")
+    await state.set_state(TechState.ptv_defect)
+
+@router.message(TechState.ptv_defect)
+async def ptv_defect_received(message: Message, state: FSMContext):
+    defect = message.text.strip()
+    if not defect:
+        await message.answer("⚠️ Опишите дефект:")
+        return
+    await state.update_data(defect=defect)
+    await message.answer(
+        "Присутствуют ли механические повреждения?\n(Царапины, сколы, трещины, вмятины и т.д.)",
+        reply_markup=get_mp_buttons()
+    )
+    await state.set_state(TechState.ptv_mp_check)
+
+@router.callback_query(F.data.startswith("mp_"), TechState.ptv_mp_check)
+async def ptv_mp_check_selected(cb: CallbackQuery, state: FSMContext):
+    mp_status = "Да" if cb.data == "mp_yes" else "Нет"
+    await state.update_data(mp_status=mp_status)
+    await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:")
+    await state.set_state(TechState.ptv_date)
+
+@router.message(TechState.ptv_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def ptv_date_valid(message: Message, state: FSMContext):
+    date_str = message.text.strip()
+    await state.update_data(purchase_date=date_str)
+    try:
+        d_buy = datetime.strptime(date_str, "%d.%m.%Y").date()
+        days = (date.today() - d_buy).days
+        days_text = "Дата в будущем?" if days < 0 else f"{days} дней"
+        days_int = -1 if days < 0 else days
+    except Exception:
+        days_text = "Ошибка расчета"
+        days_int = -1
+    await state.update_data(days_text=days_text, days_int=days_int)
+    await message.answer("👤 Введите ФИО клиента (полностью):")
+    await state.set_state(TechState.ptv_client_name)
+
+@router.message(TechState.ptv_date)
+async def ptv_date_invalid(message: Message):
+    await message.answer("⚠️ Неверный формат! Используйте ДД.ММ.ГГГГ:")
+
+@router.message(TechState.ptv_client_name)
+async def ptv_client_name_received(message: Message, state: FSMContext):
+    client_name = message.text.strip()
+    if not client_name:
+        await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:")
+        return
+    await state.update_data(client_name=client_name)
+    await message.answer("📸 Отправьте фото лицевой стороны устройства:")
+    await state.set_state(TechState.ptv_photo_front)
+
+@router.message(TechState.ptv_photo_front, F.photo)
+async def ptv_photo_front_received(message: Message, state: FSMContext):
+    await state.update_data(photo_front=message.photo[-1].file_id)
+    await message.answer("📸 Отправьте фото обратной стороны устройства:")
+    await state.set_state(TechState.ptv_photo_back)
+
+@router.message(TechState.ptv_photo_front)
+async def ptv_photo_front_invalid(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото:")
+
+@router.message(TechState.ptv_photo_back, F.photo)
+async def ptv_photo_back_received(message: Message, state: FSMContext):
+    await state.update_data(photo_back=message.photo[-1].file_id)
+    await message.answer("📄 Есть ли гарантийный талон?", reply_markup=get_warranty_status_buttons())
+    await state.set_state(TechState.ptv_warranty_choice)
+
+@router.message(TechState.ptv_photo_back)
+async def ptv_photo_back_invalid(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото:")
+
+@router.callback_query(F.data.startswith("warranty_"), TechState.ptv_warranty_choice)
+async def ptv_warranty_choice_selected(cb: CallbackQuery, state: FSMContext):
+    if cb.data == "warranty_lost":
+        await state.update_data(warranty_status="lost", photo_warranty=None)
+        await cb.message.answer("✅ Заявка сформирована (без талона). Ожидайте решения.")
+        await process_ptv_claim(cb.message, state, cb.from_user)
+    elif cb.data == "warranty_photo":
+        await cb.message.answer("📸 Отправьте фото гарантийного талона:")
+        await state.set_state(TechState.ptv_photo_warranty)
+
+@router.message(TechState.ptv_photo_warranty, F.photo)
+async def ptv_photo_warranty_received(message: Message, state: FSMContext):
+    await state.update_data(warranty_status="has_photo", photo_warranty=message.photo[-1].file_id)
+    await message.answer("✅ Заявка сформирована (с талоном). Ожидайте решения.")
+    await process_ptv_claim(message, state, message.from_user)
+
+@router.message(TechState.ptv_photo_warranty)
+async def ptv_photo_warranty_invalid(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото талона:")
+
+async def process_ptv_claim(message: Message, state: FSMContext, user):
+    data = await state.get_data()
+    defect = data['defect']
+    mp_status = data['mp_status']
+    purchase_date = data['purchase_date']
+    client_name = data['client_name']
+    days_text = data.get('days_text', 'Неизвестно')
+
+    photo_front = data.get('photo_front')
+    photo_back = data.get('photo_back')
+    warranty_status = data.get('warranty_status')
+    photo_warranty = data.get('photo_warranty')
+
+    media_list = []
+    if photo_front:
+        media_list.append(InputMediaPhoto(media=photo_front, caption="Лицевая сторона"))
+    if photo_back:
+        media_list.append(InputMediaPhoto(media=photo_back, caption="Обратная сторона"))
+    if warranty_status == "has_photo" and photo_warranty:
+        media_list.append(InputMediaPhoto(media=photo_warranty, caption="Гарантийный талон"))
+
+    if not media_list:
+        print("⚠️ ОШИБКА: В заявке ПТВ нет фото! Отправка отменена.")
+        await message.answer("⚠️ Ошибка: не получены фото. Попробуйте снова.")
+        return
+
+    all_photos_str = "|".join([p.media for p in media_list])
+    claim_data = {
+        'category': 'tech',
+        'sub_category': 'ПТВ',
+        'brand': 'N/A',
+        'defect': defect,
+        'purchase_date': purchase_date,
+        'client_wish': 'N/A',
+        'photo': all_photos_str,
+        'client_name': client_name
+    }
+
+    try:
+        claim_id = await create_claim(claim_data, user.id)
+    except Exception as e:
+        print(f"❌ Ошибка создания заявки: {e}")
+        await message.answer("⚠️ Ошибка сохранения заявки. Попробуйте позже.")
+        return
+
+    await state.clear()
+    await message.answer(f"✅ Ваша заявка #{claim_id} (ПТВ) принята в обработку!")
+
+    tt_link = f"tg://user?id={user.id}"
+    tt_display = f"[{user.full_name}]({tt_link})"
+    warranty_display = "Предоставлен" if warranty_status == "has_photo" else "Утерян"
+
+    request_text = (
+         f"📱 **НОВАЯ ЗАЯВКА (Техника) #{claim_id}**\n"
+         f"━━━━━━━━━━━━━━━━━━━━\n"
+         f"👤 **Клиент:** {client_name}\n"
+         f"📝 **Дефект:**\n_{defect}_\n"
+         f"🔧 **Мех. повреждения:** {mp_status}\n"
+         f"📅 **Дата покупки:** {purchase_date}\n"
+         f"⏳ **Прошло:** {days_text}\n"
+         f"📄 **Гарантийный талон:** {warranty_display}\n"
+         f"👤 **ТТ:** {tt_display}"
+         
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Возврат/Обмен", callback_data=f"adm_ptv_return_{claim_id}")],
+        [InlineKeyboardButton(text="🔧 Гарантийное обслуживание", callback_data=f"adm_ptv_repair_{claim_id}")]
+    ])
+
+    admins = await get_admins_by_role('admin_tech')
+    if not admins:
+        print(f"❌ Нет админов для ПТВ! Заявка #{claim_id} в архиве.")
+        return
+
+    for admin_id in admins:
+        try:
+            await bot.send_media_group(chat_id=admin_id, media=media_list)
+            await bot.send_message(chat_id=admin_id, text=request_text, parse_mode="Markdown")
+            await bot.send_message(chat_id=admin_id, text="Выберите решение по заявке:", reply_markup=kb)
+        except Exception as e:
+            print(f"❌ Ошибка отправки админу {admin_id}: {e}")
+
+@router.callback_query(F.data == "tech_new")
+async def tech_new_start(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.update_data(category_type="new_device")
+    await cb.message.answer("🆕 **Новое устройство**\n\nКакое устройство сдают? (Название/Модель):")
+    await state.set_state(TechState.new_device_name)
+
+@router.message(TechState.new_device_name)
+async def new_device_name_received(message: Message, state: FSMContext):
+    device_name = message.text.strip()
+    if not device_name:
+        await message.answer("⚠️ Введите название устройства:")
+        return
+    await state.update_data(device_name=device_name)
+    await message.answer("📝 Опишите дефект со слов клиента:")
+    await state.set_state(TechState.new_defect)
+
+@router.message(TechState.new_defect)
+async def new_defect_received(message: Message, state: FSMContext):
+    defect = message.text.strip()
+    if not defect:
+        await message.answer("⚠️ Опишите дефект:")
+        return
+    await state.update_data(defect=defect)
+    await message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:")
+    await state.set_state(TechState.new_date)
+
+@router.message(TechState.new_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def new_date_valid(message: Message, state: FSMContext):
+    date_str = message.text.strip()
+    await state.update_data(purchase_date=date_str)
+    try:
+        d_buy = datetime.strptime(date_str, "%d.%m.%Y").date()
+        days = (date.today() - d_buy).days
+        days_text = f"{days} дней" if days >= 0 else "Дата в будущем?"
+        days_int = days if days >= 0 else -1
+    except Exception:
+        days_text = "Ошибка расчета"
+        days_int = -1
+    await state.update_data(days_text=days_text, days_int=days_int)
+    await message.answer("👤 Введите ФИО клиента (полностью):")
+    await state.set_state(TechState.new_client_name)
+
+@router.message(TechState.new_date)
+async def new_date_invalid(message: Message):
+    await message.answer("⚠️ Неверный формат! Используйте ДД.ММ.ГГГГ:")
+
+@router.message(TechState.new_client_name)
+async def new_client_name_received(message: Message, state: FSMContext):
+    client_name = message.text.strip()
+    if not client_name:
+        await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:")
+        return
+    await state.update_data(client_name=client_name)
+    await message.answer("📸 Отправьте фото лицевой стороны устройства:")
+    await state.set_state(TechState.new_photo_front)
+
+@router.message(TechState.new_photo_front, F.photo)
+async def new_photo_front_received(message: Message, state: FSMContext):
+    await state.update_data(photo_front=message.photo[-1].file_id)
+    await message.answer("📸 Отправьте фото обратной стороны устройства:")
+    await state.set_state(TechState.new_photo_back)
+
+@router.message(TechState.new_photo_front)
+async def new_photo_front_invalid(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото:")
+
+@router.message(TechState.new_photo_back, F.photo)
+async def new_photo_back_received(message: Message, state: FSMContext):
+    await state.update_data(photo_back=message.photo[-1].file_id)
+    await message.answer("📄 Есть ли гарантийный талон?", reply_markup=get_warranty_status_buttons())
+    await state.set_state(TechState.new_warranty_choice)
+
+@router.message(TechState.new_photo_back)
+async def new_photo_back_invalid(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото:")
+
+@router.callback_query(F.data.startswith("warranty_"), TechState.new_warranty_choice)
+async def new_warranty_choice_selected(cb: CallbackQuery, state: FSMContext):
+    if cb.data == "warranty_lost":
+        await state.update_data(warranty_status="lost", photo_warranty=None)
+        await cb.message.answer("✅ Заявка сформирована (без талона). Ожидайте решения.")
+        await process_new_device_claim(cb.message, state, cb.from_user)
+    elif cb.data == "warranty_photo":
+        await cb.message.answer("📸 Отправьте фото гарантийного талона:")
+        await state.set_state(TechState.new_photo_warranty)
+
+@router.message(TechState.new_photo_warranty, F.photo)
+async def new_photo_warranty_received(message: Message, state: FSMContext):
+    await state.update_data(warranty_status="has_photo", photo_warranty=message.photo[-1].file_id)
+    await message.answer("✅ Заявка сформирована (с талоном). Ожидайте решения.")
+    await process_new_device_claim(message, state, message.from_user)
+
+@router.message(TechState.new_photo_warranty)
+async def new_photo_warranty_invalid(message: Message):
+    await message.answer("⚠️ Пожалуйста, отправьте фото талона:")
+
+async def process_new_device_claim(message: Message, state: FSMContext, user):
+    data = await state.get_data()
+    device_name = data['device_name']
+    defect = data['defect']
+    purchase_date = data['purchase_date']
+    client_name = data['client_name']
+    days_int = data.get('days_int', -1)
+    days_text = data.get('days_text', 'Неизвестно')
+
+    photo_front = data.get('photo_front')
+    photo_back = data.get('photo_back')
+    warranty_status = data.get('warranty_status')
+    photo_warranty = data.get('photo_warranty')
+
+    media_list = []
+    if photo_front:
+        media_list.append(InputMediaPhoto(media=photo_front, caption="Лицевая сторона"))
+    if photo_back:
+        media_list.append(InputMediaPhoto(media=photo_back, caption="Обратная сторона"))
+    if warranty_status == "has_photo" and photo_warranty:
+        media_list.append(InputMediaPhoto(media=photo_warranty, caption="Гарантийный талон"))
+
+    if not media_list:
+        media_list.append(InputMediaPhoto(media=photo_front or photo_back, caption="Фото устройства"))
+
+    all_photos_str = "|".join([p.media for p in media_list])
+    claim_data = {
+        'category': 'tech',
+        'sub_category': 'Новое устройство',
+        'brand': device_name,
+        'defect': defect,
+        'purchase_date': purchase_date,
+        'client_wish': 'N/A',
+        'photo': all_photos_str,
+        'client_name': client_name
+    }
+
+    claim_id = await create_claim(claim_data, user.id)
+
+    if days_int < 0:
+        status = "error_date"
+        action_text = "⚠️ Ошибка в дате"
+        client_instruction = "⚠️ Проверьте дату покупки."
+    elif days_int < 14:
+        status = "quality_check"
+        action_text = "Одобрен прием на проверку качества (ПК)"
+        client_instruction = (
+            "✅ Действие: Принять на Проверку Качества (ПК).\n\n"
+            "📄 Оформите Акт приема на ГО."
+        )
+    elif days_int <= 365:
+        status = "repair"
+        action_text = "Одобрен прием на гарантийное обслуживание (Ремонт)"
+        client_instruction = (
+            "✅ Действие: Принять на Гарантийный ремонт.\n\n"
+            "📄 Оформите Акт приема на ГО."
+        )
+    else:
+        status = "expired"
+        action_text = "Гарантийное обслуживание закончилось"
+        client_instruction = "⚠️ Внимание: Гарантия истекла."
+
+    await update_claim_status(claim_id, status)
+    await state.clear()
+    await message.answer(
+        f"✅ Ваша заявка #{claim_id} принята!\n\n{client_instruction}",
+        parse_mode="Markdown"
+    )
+
+    tt_link = f"tg://user?id={user.id}"
+    tt_display = f"[{user.full_name}]({tt_link})"
+
+    request_text = (
+         f"📱 **НОВАЯ ЗАЯВКА (Новое устройство) #{claim_id}**\n"
+         f"━━━━━━━━━━━━━━━━━━━━\n"
+         f"👤 **ТТ:** {tt_display}\n"
+         f"📱 **Устройство:** {device_name}\n"
+         f"👤 **Клиент:** {client_name}\n"
+         f"📝 **Дефект:**\n_{defect}_\n"
+         f"📅 **Дата покупки:** {purchase_date}\n"
+         f"⏳ **Прошло:** {days_text}\n"
+         f"━━━━━━━━━━━━━━━━━━━━\n"
+         f"📌 **Решение системы:**\n{action_text}"
+         
+    )
+
+    admins = await get_admins_by_role('admin_tech')
+    if admins:
+        for admin_id in admins:
+            try:
+                if media_list:
+                    await bot.send_media_group(chat_id=admin_id, media=media_list)
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=request_text,
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await bot.send_message(admin_id, request_text, parse_mode="Markdown")
+            except Exception as e:
+                print(f"Ошибка отправки админу {admin_id}: {e}")
+    else:
+        print(f"⚠️ НЕТ АДМИНОВ для Техники! Заявка #{claim_id} в архиве.")
+
+
+==================================================
+=== ФАЙЛ: .\handlers\__init__.py ===
+==================================================
+
+
