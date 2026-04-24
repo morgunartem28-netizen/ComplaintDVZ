@@ -1,7 +1,10 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
-from database import get_user_role, update_claim_status, get_claim, log_action, set_user_role, add_claim_history
+from database import (
+    get_user_role, update_claim_status, get_claim, log_action, 
+    set_user_role, add_claim_history
+)
 from keyboards import get_super_admin_menu, get_role_selection_buttons
 from bot_instance import bot
 from states import AdminActionFSM, SuperAdminFSM
@@ -15,26 +18,31 @@ async def admin_approve(cb: CallbackQuery):
         full_name = cb.from_user.full_name or "Админ"
         
         claim = await get_claim(claim_id)
-        old_status = claim.get('status') if claim else "pending"
+        if not claim:
+            await cb.answer("Заявка не найдена", show_alert=True)
+            return
+            
+        old_status = claim.get('status', "pending")
+        display_id = claim.get('display_id', f'#{claim_id}')
         
         await update_claim_status(claim_id, 'approved', admin_name=full_name)
-        await add_claim_history(claim_id, old_status, 'approved', cb.from_user.id, full_name)
+        await add_claim_history(claim_id, display_id, old_status, 'approved', cb.from_user.id, full_name)
         await log_action(cb.from_user.id, 'approve', claim_id)
         
         new_caption = f"{cb.message.caption}\n\n✅ **ОДОБРЕНО** (Админ: {full_name})"
         await cb.message.edit_caption(caption=new_caption, parse_mode="Markdown")
         
-        if claim:
-            user_id = claim.get('user_id')
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"✅ Ваша заявка #{claim_id} одобрена!\n"
-                    f"Решение принял: {full_name}\n\n"
-                    f"⚠️ Если возвращённый товар непригоден для продажи "
-                    f"(не работает, сломан, разбит и т.д.), его необходимо отбраковать и приложить номер заявки к накладной."
-                )
-            except: pass
+        user_id = claim.get('user_id')
+        try:
+            await bot.send_message(
+                user_id,
+                f"✅ Ваша заявка **{display_id}** одобрена!\n"
+                f"Решение принял: {full_name}\n\n"
+                f"⚠️ Если возвращённый товар непригоден для продажи "
+                f"(не работает, сломан, разбит и т.д.), его необходимо отбраковать и приложить номер заявки к накладной."
+            )
+        except: pass
+            
     except Exception as e:
         print(f"Ошибка при одобрении: {e}")
         await cb.answer("Произошла ошибка при обработке.")
@@ -59,10 +67,11 @@ async def admin_reject_finish(message: Message, state: FSMContext):
     full_name = message.from_user.full_name or "Админ"
     
     claim = await get_claim(claim_id)
-    old_status = claim.get('status') if claim else "pending"
+    old_status = claim.get('status', "pending") if claim else "pending"
+    display_id = claim.get('display_id', f'#{claim_id}') if claim else f'#{claim_id}'
     
     await update_claim_status(claim_id, 'rejected', comment=comment, admin_name=full_name)
-    await add_claim_history(claim_id, old_status, 'rejected', message.from_user.id, full_name, comment)
+    await add_claim_history(claim_id, display_id, old_status, 'rejected', message.from_user.id, full_name, comment)
     await log_action(message.from_user.id, 'reject', claim_id)
     await state.clear()
     await message.answer("✅ Заявка отклонена, сотрудник уведомлен.")
@@ -72,7 +81,7 @@ async def admin_reject_finish(message: Message, state: FSMContext):
         try:
             await bot.send_message(
                 user_id,
-                f"❌ Заявка #{claim_id} отклонена.\nПричина: {comment}\nРешение принял: {full_name}"
+                f"❌ Заявка **{display_id}** отклонена.\nПричина: {comment}\nРешение принял: {full_name}"
             )
         except: pass
 
@@ -83,10 +92,15 @@ async def admin_ptv_return(cb: CallbackQuery):
         full_name = cb.from_user.full_name or "Админ"
         
         claim = await get_claim(claim_id)
-        old_status = claim.get('status') if claim else "pending"
+        if not claim:
+            await cb.answer("Заявка не найдена", show_alert=True)
+            return
+            
+        old_status = claim.get('status', "pending")
+        display_id = claim.get('display_id', f'#{claim_id}')
         
         await update_claim_status(claim_id, 'approved', admin_name=full_name, comment="Возврат/Обмен разрешен")
-        await add_claim_history(claim_id, old_status, 'approved', cb.from_user.id, full_name, "Возврат/Обмен разрешен")
+        await add_claim_history(claim_id, display_id, old_status, 'approved', cb.from_user.id, full_name, "Возврат/Обмен разрешен")
         await log_action(cb.from_user.id, 'ptv_return', claim_id)
         
         current_text = cb.message.text or "Выберите решение по заявке:"
@@ -99,17 +113,16 @@ async def admin_ptv_return(cb: CallbackQuery):
         )
         await cb.message.edit_text(text=new_text, parse_mode="Markdown", reply_markup=None)
         
-        if claim:
-            user_id = claim.get('user_id')
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"✅ **Решение по заявке #{claim_id}:**\n\n"
-                    f"Разрешен **ОБМЕН**.\n"
-                    f"В случае отказа клиента от обмена, разрешен **ВОЗВРАТ**.\n\n"
-                    f"Решение принял: {full_name}"
-                )
-            except: pass
+        user_id = claim.get('user_id')
+        try:
+            await bot.send_message(
+                user_id,
+                f"✅ **Решение по заявке {display_id}:**\n\n"
+                f"Разрешен **ОБМЕН**.\n"
+                f"В случае отказа клиента от обмена, разрешен **ВОЗВРАТ**.\n\n"
+                f"Решение принял: {full_name}"
+            )
+        except: pass
         await cb.answer("Решение принято: Возврат/Обмен")
     except Exception as e:
         print(f"Ошибка: {e}")
@@ -122,10 +135,15 @@ async def admin_ptv_repair(cb: CallbackQuery):
         full_name = cb.from_user.full_name or "Админ"
         
         claim = await get_claim(claim_id)
-        old_status = claim.get('status') if claim else "pending"
+        if not claim:
+            await cb.answer("Заявка не найдена", show_alert=True)
+            return
+            
+        old_status = claim.get('status', "pending")
+        display_id = claim.get('display_id', f'#{claim_id}')
         
         await update_claim_status(claim_id, 'approved', admin_name=full_name, comment="Гарантийное обслуживание")
-        await add_claim_history(claim_id, old_status, 'approved', cb.from_user.id, full_name, "Гарантийное обслуживание")
+        await add_claim_history(claim_id, display_id, old_status, 'approved', cb.from_user.id, full_name, "Гарантийное обслуживание")
         await log_action(cb.from_user.id, 'ptv_repair', claim_id)
         
         current_text = cb.message.text or "Выберите решение по заявке:"
@@ -137,16 +155,15 @@ async def admin_ptv_repair(cb: CallbackQuery):
         )
         await cb.message.edit_text(text=new_text, parse_mode="Markdown", reply_markup=None)
         
-        if claim:
-            user_id = claim.get('user_id')
-            try:
-                await bot.send_message(
-                    user_id,
-                    f"✅ **Решение по заявке #{claim_id}:**\n\n"
-                    f"Технику необходимо принять на **Гарантийное обслуживание**.\n\n"
-                    f"Решение принял: {full_name}"
-                )
-            except: pass
+        user_id = claim.get('user_id')
+        try:
+            await bot.send_message(
+                user_id,
+                f"✅ **Решение по заявке {display_id}:**\n\n"
+                f"Технику необходимо принять на **Гарантийное обслуживание**.\n\n"
+                f"Решение принял: {full_name}"
+            )
+        except: pass
         await cb.answer("Решение принято: Гарантийное обслуживание")
     except Exception as e:
         print(f"Ошибка: {e}")

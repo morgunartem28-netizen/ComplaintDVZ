@@ -214,14 +214,14 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
     }
 
     try:
-        claim_id = await create_claim(claim_data, cb.from_user.id)
+        internal_id, display_id = await create_claim(claim_data, cb.from_user.id)
     except Exception as e:
         await cb.message.answer("❌ Ошибка сохранения заявки. Попробуйте позже.")
         await state.clear()
         return
 
     await state.clear()
-    await cb.message.answer(f"✅ Заявка #{claim_id} (Аксессуар) создана!", parse_mode="Markdown")
+    await cb.message.answer(f"✅ Заявка **{display_id}** (Аксессуар) создана!", parse_mode="Markdown")
 
     target_admins = await get_admins_by_role('admin_acc')
     if not target_admins:
@@ -232,7 +232,7 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
     tt_display = f"[{cb.from_user.full_name}]({tt_link})"
     
     caption = (
-        f"🆕 **НОВАЯ ЗАЯВКА (Аксессуар) #{claim_id}**\n\n"
+        f"🆕 **НОВАЯ ЗАЯВКА (Аксессуар) {display_id}**\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 **ТТ:** {tt_display}\n"
         f"👤 **Сотрудник:** {client_name}\n"
@@ -242,7 +242,7 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
         f"💬 **Требование клиента:** {wish_ru}\n\n"
     )
     
-    keyboard = get_admin_decision(claim_id)
+    keyboard = get_admin_decision(internal_id)  # внутренний ID для callback
 
     for admin_id in target_admins:
         try:
@@ -254,4 +254,4 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
                 parse_mode="Markdown"
             )
         except Exception as e:
-            print(f"Ошибка отправки заявки #{claim_id} админу {admin_id}: {e}")
+            print(f"Ошибка отправки заявки {display_id} админу {admin_id}: {e}")

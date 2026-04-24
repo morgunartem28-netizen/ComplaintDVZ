@@ -4,13 +4,26 @@ import io
 from datetime import datetime
 from config import DB_NAME, ADMIN_IDS
 
+# Импортируем openpyxl с обработкой ошибки, если её нет
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
 # ID супер-админов из .env (список)
 ENV_SUPER_ADMIN_IDS = ADMIN_IDS if ADMIN_IDS else []
+
+# ПРЕФИКСЫ НУМЕРАЦИИ
+PREFIX_TECH = "Т"
+PREFIX_ACC = "А"
 
 async def archive_old_claims(days: int = 365):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(f"""
-            INSERT INTO claims_archive SELECT * FROM claims 
+            INSERT INTO claims_archive 
+            SELECT * FROM claims 
             WHERE date(created_at) < date('now', '-{days} days')
         """)
         await db.execute(f"""
@@ -24,6 +37,7 @@ async def archive_old_claims(days: int = 365):
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
+        # Основная таблица заявок
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -33,6 +47,7 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS claims (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_id TEXT UNIQUE,
                 user_id INTEGER,
                 category TEXT,
                 sub_category TEXT,
@@ -69,6 +84,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS claim_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 claim_id INTEGER,
+                display_id TEXT,
                 old_status TEXT,
                 new_status TEXT,
                 admin_id INTEGER,
@@ -80,7 +96,20 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS claims_archive AS SELECT * FROM claims WHERE 1=0
         """)
-        
+        # Таблица-счётчик для нумерации Т/А
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS claim_counters (
+                category TEXT PRIMARY KEY,
+                last_number INTEGER DEFAULT 0
+            )
+        """)
+        # Инициализируем счётчики если их нет
+        await db.execute("""
+            INSERT OR IGNORE INTO claim_counters (category, last_number) VALUES ('tech', 0)
+        """)
+        await db.execute("""
+            INSERT OR IGNORE INTO claim_counters (category, last_number) VALUES ('acc', 0)
+        """)
         # Авто-назначение супер-админов из .env
         if ENV_SUPER_ADMIN_IDS:
             for admin_id in ENV_SUPER_ADMIN_IDS:
@@ -88,7 +117,6 @@ async def init_db():
                     "INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)",
                     (admin_id, 'super_admin')
                 )
-        
         await db.commit()
 
 async def get_user_role(user_id: int) -> str:
@@ -121,29 +149,59 @@ async def log_update(user_id: int, update_type: str):
         )
         await db.commit()
 
-async def create_claim(data: dict, user_id: int) -> int:
+async def get_next_display_id(category: str) -> str:
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT last_number FROM claim_counters WHERE category = ?",
+            (category,)
+        )
+        row = await cursor.fetchone()
+        current = row[0] if row else 0
+        next_num = current + 1
+        await db.execute(
+            "UPDATE claim_counters SET last_number = ? WHERE category = ?",
+            (next_num, category)
+        )
+        await db.commit()
+        prefix = PREFIX_TECH if category == 'tech' else PREFIX_ACC
+        return f"{prefix}{next_num}"
+
+async def create_claim(data: dict, user_id: int) -> tuple:
+    """
+    Создаёт заявку.
+    ОЖИДАЕМЫЕ КЛЮЧИ В data:
+    - category, sub_category, brand, defect, purchase_date, client_wish, photo, client_name
+    """
+    category = data['category']
+    display_id = await get_next_display_id(category)
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("""
-            INSERT INTO claims (user_id, category, sub_category, brand, defect_desc, purchase_date, client_wish, photo_id, client_name) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO claims (
+                display_id, user_id, category, sub_category, brand, 
+                defect_desc, purchase_date, client_wish, photo_id, client_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            user_id, 
-            data['category'], 
-            data['sub_category'], 
-            data.get('brand'), 
-            data['defect'], 
-            data.get('date'), 
-            data.get('wish'), 
-            data['photo'], 
-            data.get('client_name', 'Не указано')
+            display_id, user_id, data['category'], data.get('sub_category'), 
+            data.get('brand'), data.get('defect'), data.get('purchase_date'), 
+            data.get('client_wish'), data['photo'], data.get('client_name', 'Не указано')
         ))
         await db.commit()
-        return cursor.lastrowid
+        return cursor.lastrowid, display_id
 
 async def get_claim(claim_id: int):
     async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row 
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM claims WHERE id = ?", (claim_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+async def get_claim_by_display_id(display_id: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM claims WHERE display_id = ?", (display_id,))
         row = await cursor.fetchone()
         if not row:
             return None
@@ -157,34 +215,32 @@ async def update_claim_status(claim_id: int, status: str, comment: str = None, a
         )
         await db.commit()
 
-async def add_claim_history(claim_id: int, old_status: str, new_status: str, 
-                            admin_id: int, admin_name: str, comment: str = None):
+async def add_claim_history(claim_id: int, display_id: str, old_status: str, new_status: str, admin_id: int, admin_name: str, comment: str = None):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
-            INSERT INTO claim_history (claim_id, old_status, new_status, admin_id, admin_name, comment) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (claim_id, old_status, new_status, admin_id, admin_name, comment))
+            INSERT INTO claim_history (claim_id, display_id, old_status, new_status, admin_id, admin_name, comment)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (claim_id, display_id, old_status, new_status, admin_id, admin_name, comment))
         await db.commit()
 
 async def get_claim_history(claim_id: int):
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("""
             SELECT old_status, new_status, admin_name, comment, changed_at 
-            FROM claim_history WHERE claim_id = ? ORDER BY changed_at DESC
+            FROM claim_history 
+            WHERE claim_id = ? 
+            ORDER BY changed_at DESC
         """, (claim_id,))
         return await cursor.fetchall()
 
 async def get_admins_by_role(role_prefix: str):
     async with aiosqlite.connect(DB_NAME) as db:
         if role_prefix == 'super_admin':
-            # Только супер-админы из БД + гарантированно из .env
             cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
             rows = await cursor.fetchall()
             db_admins = [row[0] for row in rows]
             return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
-        
         elif role_prefix in ('admin_tech', 'admin_acc'):
-            # Специфичные админы + супер-админы из БД + гарантированно из .env
             cursor = await db.execute(
                 "SELECT user_id FROM users WHERE role = ? OR role = 'super_admin'",
                 (role_prefix,)
@@ -192,7 +248,6 @@ async def get_admins_by_role(role_prefix: str):
             rows = await cursor.fetchall()
             db_admins = [row[0] for row in rows]
             return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
-        
         else:
             cursor = await db.execute("SELECT user_id FROM users WHERE role = ?", (role_prefix,))
             rows = await cursor.fetchall()
@@ -247,26 +302,116 @@ async def get_stats_by_points():
 async def get_pending_claims():
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("""
-            SELECT id, user_id, category, sub_category, created_at 
+            SELECT id, display_id, user_id, category, sub_category, created_at 
             FROM claims 
-            WHERE status = 'pending' AND (julianday('now') - julianday(created_at)) * 24 > 2 
+            WHERE status = 'pending' 
+            AND (julianday('now') - julianday(created_at)) * 24 > 2 
             ORDER BY created_at ASC
         """)
         return await cursor.fetchall()
 
+async def export_stats_to_excel() -> bytes:
+    """
+    Экспортирует все заявки в формат .xlsx с красивым форматированием.
+    Возвращает байты файла.
+    """
+    if not OPENPYXL_AVAILABLE:
+        return b"Error: openpyxl library not installed. Please run 'pip install openpyxl'"
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("""
+            SELECT id, display_id, user_id, category, sub_category, brand, 
+                   defect_desc, purchase_date, client_wish, status, admin_name, 
+                   client_name, created_at 
+            FROM claims 
+            ORDER BY created_at DESC
+        """)
+        rows = await cursor.fetchall()
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Отчет по заявкам"
+        
+        headers = [
+            'ID', 'Номер заявки', 'User ID', 'Категория', 'Подкатегория', 
+            'Бренд', 'Дефект', 'Дата покупки', 'Пожелание клиента', 
+            'Статус', 'Админ', 'Клиент', 'Дата создания'
+        ]
+        
+        # Стили
+        header_font = Font(bold=True, color="FFFFFF", size=12)
+        header_bg = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        thin_border = Border(
+            left=Side(style='thin'), right=Side(style='thin'), 
+            top=Side(style='thin'), bottom=Side(style='thin')
+        )
+        center_align = Alignment(horizontal='center', vertical='center')
+        left_align = Alignment(horizontal='left', vertical='center')
+        
+        # Ширина колонок
+        col_widths = [5, 10, 10, 15, 20, 25, 40, 15, 20, 15, 15, 20, 20]
+        
+        # 1. Заголовки
+        for col_num, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_num, value=header)
+            cell.font = header_font
+            cell.fill = header_bg
+            cell.alignment = center_align
+            cell.border = thin_border
+            if col_num <= len(col_widths):
+                ws.column_dimensions[chr(64 + col_num)].width = col_widths[col_num - 1]
+        
+        # 2. Данные
+        for row_idx, row_data in enumerate(rows, 2):
+            for col_num, value in enumerate(row_data, 1):
+                cell_value = "" if value is None else str(value)
+                cell = ws.cell(row=row_idx, column=col_num, value=cell_value)
+                cell.border = thin_border
+                cell.alignment = left_align
+        
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output.getvalue()
+
 async def export_stats_to_csv() -> bytes:
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("""
-            SELECT id, user_id, category, sub_category, brand, defect_desc, purchase_date, client_wish, status, admin_name, client_name, created_at 
-            FROM claims ORDER BY created_at DESC
+            SELECT id, display_id, user_id, category, sub_category, brand, 
+                   defect_desc, purchase_date, client_wish, status, admin_name, 
+                   client_name, created_at 
+            FROM claims 
+            ORDER BY created_at DESC
         """)
         rows = await cursor.fetchall()
+        
         output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow([
-            'ID', 'User ID', 'Категория', 'Подкатегория', 'Бренд', 'Дефект', 
-            'Дата покупки', 'Пожелание клиента', 'Статус', 'Админ', 'Клиент', 'Дата создания'
-        ])
+        headers = [
+            'ID', 'Номер заявки', 'User ID', 'Категория', 'Подкатегория', 
+            'Бренд', 'Дефект', 'Дата покупки', 'Пожелание клиента', 
+            'Статус', 'Админ', 'Клиент', 'Дата создания'
+        ]
+        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
+        writer.writerow(headers)
         for row in rows:
             writer.writerow(row)
         return output.getvalue().encode('utf-8-sig')
+
+async def get_claims_count() -> int:
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM claims")
+        return (await cursor.fetchone())[0]
+
+async def get_archive_count() -> int:
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM claims_archive")
+        return (await cursor.fetchone())[0]
+
+async def clear_all_claims():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("DELETE FROM claims")
+        await db.execute("DELETE FROM claims_archive")
+        await db.execute("DELETE FROM claim_history")
+        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tech'")
+        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'acc'")
+        await db.commit()

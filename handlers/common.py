@@ -1,9 +1,10 @@
 from aiogram import Router, F
 from aiogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
 from aiogram.fsm.context import FSMContext
-from database import get_user_role, set_user_role, get_claim
+from database import get_user_role, set_user_role, get_claim, get_claim_by_display_id
 from keyboards import get_main_menu, get_tech_type_buttons
 from states import TechState, AccState
+import re
 
 router = Router()
 
@@ -12,8 +13,6 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     current_role = await get_user_role(user_id)
-    
-    # Защита: не сбрасываем админские роли
     if current_role in ('super_admin', 'admin_tech', 'admin_acc'):
         role = current_role
     elif current_role == 'user' or current_role is None:
@@ -53,11 +52,14 @@ async def tech_start(message: Message, state: FSMContext):
     await message.answer("Выберите тип обращения:", reply_markup=get_tech_type_buttons())
     await state.set_state(TechState.type_choice)
 
-@router.inline_query(F.query.regexp(r'^\d+$'))
+# --- ОБРАБОТЧИК INLINE ЗАПРОСОВ ---
+@router.inline_query(F.query)
 async def inline_search_claim(inline_query: InlineQuery):
     user_id = inline_query.from_user.id
-    role = await get_user_role(user_id)
+    query_text = inline_query.query.strip()
 
+    # 1. Проверка прав доступа
+    role = await get_user_role(user_id)
     if role not in ['admin_tech', 'admin_acc', 'super_admin']:
         await inline_query.answer(
             results=[],
@@ -67,19 +69,23 @@ async def inline_search_claim(inline_query: InlineQuery):
         )
         return
 
-    try:
-        claim_id = int(inline_query.query)
-    except ValueError:
+    # 2. Проверка формата ввода
+    if not re.match(r'^[ТА][0-9]+$', query_text, re.IGNORECASE):
         await inline_query.answer(
             results=[],
-            switch_pm_text="Введите только номер заявки",
-            switch_pm_parameter="invalid_id",
-            cache_time=0
+            switch_pm_text="Введите номер в формате Т1 или А1",
+            switch_pm_parameter="invalid_format",
+            cache_time=5
         )
         return
 
-    claim = await get_claim(claim_id)
+    search_id = query_text.upper()
+    print(f"🔍 Inline запрос: '{query_text}' -> Поиск по БД: '{search_id}'")
+
+    # 3. Поиск заявки
+    claim = await get_claim_by_display_id(search_id)
     if not claim:
+        print(f"❌ Заявка '{search_id}' не найдена в БД.")
         await inline_query.answer(
             results=[],
             switch_pm_text="Заявка не найдена",
@@ -88,6 +94,7 @@ async def inline_search_claim(inline_query: InlineQuery):
         )
         return
 
+    # Извлекаем данные
     c_id = claim.get('id')
     c_category = claim.get('category')
     c_defect = claim.get('defect_desc')
@@ -99,6 +106,7 @@ async def inline_search_claim(inline_query: InlineQuery):
     c_client_name = claim.get('client_name')
     c_created_at = claim.get('created_at')
 
+    # Проверка доступа к категории
     access_denied = False
     if role == 'admin_tech' and c_category != 'tech':
         access_denied = True
@@ -106,6 +114,7 @@ async def inline_search_claim(inline_query: InlineQuery):
         access_denied = True
 
     if access_denied:
+        print(f"🚫 Доступ запрещен для пользователя {user_id} к категории {c_category}")
         await inline_query.answer(
             results=[],
             switch_pm_text="🚫 У вас нет доступа к этой категории",
@@ -114,8 +123,9 @@ async def inline_search_claim(inline_query: InlineQuery):
         )
         return
 
+    # Форматирование данных
     category_ru = "Техника" if c_category == 'tech' else "Аксессуар"
-
+    
     status_map = {
         'pending': 'Ожидает решения',
         'approved': 'Одобрено',
@@ -126,7 +136,7 @@ async def inline_search_claim(inline_query: InlineQuery):
         'error_date': 'Ошибка даты'
     }
     status_ru = status_map.get(c_status, c_status)
-
+    
     emoji_map = {
         'pending': '⏳',
         'approved': '✅',
@@ -138,16 +148,22 @@ async def inline_search_claim(inline_query: InlineQuery):
     }
     status_emoji = emoji_map.get(c_status, '❓')
 
-    defect_text = c_defect if c_defect else "Не указано"
-    date_text = c_purchase_date if c_purchase_date else "Не указана"
-    wish_text = c_client_wish if c_client_wish else "Не указано"
-    admin_text = c_admin_name if c_admin_name else "Не назначен"
-    comment_text = c_admin_comment if c_admin_comment else "—"
-    client_text = c_client_name if c_client_name else "Не указано"
-    created_text = c_created_at if c_created_at else "Не указано"
+    # Функция для безопасного вывода текста (убираем None и пустые строки)
+    def safe_text(value, default="Не указано"):
+        if value is None or value == "":
+            return default
+        return str(value)
+
+    defect_text = safe_text(c_defect, "Не указано")
+    date_text = safe_text(c_purchase_date, "Не указана")
+    wish_text = safe_text(c_client_wish, "Не указано")
+    admin_text = safe_text(c_admin_name, "Не назначен")
+    comment_text = safe_text(c_admin_comment, "—")
+    client_text = safe_text(c_client_name, "Не указано")
+    created_text = safe_text(c_created_at, "Не указано")
 
     result_text = (
-        f"📋 **Заявка #{c_id}**\n"
+        f"📋 **Заявка {search_id}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🏷 **Категория:** {category_ru}\n"
         f"👤 **Сотрудник:** {client_text}\n"
@@ -162,7 +178,7 @@ async def inline_search_claim(inline_query: InlineQuery):
 
     result = InlineQueryResultArticle(
         id=str(c_id),
-        title=f"Заявка #{c_id} — {category_ru}",
+        title=f"{search_id} — {category_ru}",
         description=f"{client_text} | {status_ru}",
         input_message_content=InputTextMessageContent(
             message_text=result_text,
@@ -170,6 +186,7 @@ async def inline_search_claim(inline_query: InlineQuery):
         )
     )
 
+    print(f"✅ Заявка найдена: {search_id}, ID: {c_id}")
     await inline_query.answer(
         results=[result],
         cache_time=5,
