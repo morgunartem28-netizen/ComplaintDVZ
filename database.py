@@ -233,25 +233,96 @@ async def get_claim_history(claim_id: int):
         """, (claim_id,))
         return await cursor.fetchall()
 
+
+# ==========================================
+# ИСПРАВЛЕННАЯ ФУНКЦИЯ: Получение админов по роли
+# ==========================================
+
 async def get_admins_by_role(role_prefix: str):
+    """
+    Получает список ID администраторов по роли.
+    - 'admin_acc' → админы аксессуаров + все супер-админы
+    - 'admin_tech' → админы техники + все супер-админы  
+    - 'super_admin' → только супер-админы
+    """
     async with aiosqlite.connect(DB_NAME) as db:
         if role_prefix == 'super_admin':
+            # Только супер-админы (из БД + из .env)
             cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
             rows = await cursor.fetchall()
             db_admins = [row[0] for row in rows]
+            # Объединяем с ENV, убираем дубликаты
             return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
-        elif role_prefix in ('admin_tech', 'admin_acc'):
+        
+        elif role_prefix == 'admin_acc':
+            # Админы аксессуаров + супер-админы
             cursor = await db.execute(
-                "SELECT user_id FROM users WHERE role = ? OR role = 'super_admin'",
-                (role_prefix,)
+                "SELECT user_id FROM users WHERE role = 'admin_acc'"
             )
-            rows = await cursor.fetchall()
-            db_admins = [row[0] for row in rows]
-            return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
+            acc_admins = [row[0] for row in await cursor.fetchall()]
+            
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            super_admins = [row[0] for row in await cursor.fetchall()]
+            
+            return list(set(acc_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+        
+        elif role_prefix == 'admin_tech':
+            # Админы техники + супер-админы
+            cursor = await db.execute(
+                "SELECT user_id FROM users WHERE role = 'admin_tech'"
+            )
+            tech_admins = [row[0] for row in await cursor.fetchall()]
+            
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            super_admins = [row[0] for row in await cursor.fetchall()]
+            
+            return list(set(tech_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+        
         else:
+            # Для любой другой роли — точное совпадение
             cursor = await db.execute("SELECT user_id FROM users WHERE role = ?", (role_prefix,))
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+
+# ==========================================
+# НОВАЯ ФУНКЦИЯ: Список всех администраторов
+# ==========================================
+
+async def get_all_admins_list() -> dict:
+    """
+    Возвращает словарь со списками администраторов по ролям.
+    Формат: {'super_admin': [(id, name), ...], 'admin_tech': [...], 'admin_acc': [...]}
+    """
+    async with aiosqlite.connect(DB_NAME) as db:
+        result = {
+            'super_admin': [],
+            'admin_tech': [],
+            'admin_acc': []
+        }
+        
+        # Супер-админы из БД
+        cursor = await db.execute(
+            "SELECT user_id, role FROM users WHERE role = 'super_admin' ORDER BY user_id"
+        )
+        for row in await cursor.fetchall():
+            result['super_admin'].append((row[0], None))
+        
+        # Админы техники
+        cursor = await db.execute(
+            "SELECT user_id, role FROM users WHERE role = 'admin_tech' ORDER BY user_id"
+        )
+        for row in await cursor.fetchall():
+            result['admin_tech'].append((row[0], None))
+        
+        # Админы аксессуаров
+        cursor = await db.execute(
+            "SELECT user_id, role FROM users WHERE role = 'admin_acc' ORDER BY user_id"
+        )
+        for row in await cursor.fetchall():
+            result['admin_acc'].append((row[0], None))
+        
+        return result
 
 async def get_stats_overview():
     async with aiosqlite.connect(DB_NAME) as db:
@@ -405,7 +476,7 @@ async def get_claims_count() -> int:
 async def get_archive_count() -> int:
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT COUNT(*) FROM claims_archive")
-        return (await cursor.fetchone())[0]
+        return (await cursor_fetchone())[0]
 
 async def clear_all_claims():
     async with aiosqlite.connect(DB_NAME) as db:

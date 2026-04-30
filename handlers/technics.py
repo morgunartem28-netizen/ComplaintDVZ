@@ -213,7 +213,7 @@ async def process_ptv_claim(message: Message, state: FSMContext, user):
 async def tech_new_start(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(category_type="new_device")
-    await cb.message.answer("🆕 **Новое устройство**\n\nКакое устройство сдают? (Название/Модель):")
+    await cb.message.answer("🆕 Новое устройство\n\nКакое устройство сдают? (Название/Модель):")
     await state.set_state(TechState.new_device_name)
 
 @router.message(TechState.new_device_name)
@@ -362,23 +362,30 @@ async def process_new_device_claim(message: Message, state: FSMContext, user):
         print(f"Error creating claim: {e}")
         return
 
-    # --- АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ СТАТУСА ---
+       # --- АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ СТАТУСА ---
     if days_int < 0:
         status = "error_date"
         action_text = "⚠️ Ошибка в дате (будущее или некорректно)"
         client_instruction = "⚠️ Проверьте дату покупки."
-    elif days_int < 14:
+    elif days_int <= 14:
         status = "quality_check"
         action_text = "✅ Принять на Проверку Качества (ПК) (до 14 дней)"
-        client_instruction = "✅ Действие: Принять на Проверку Качества (ПК).\n📄 Оформите Акт приема на ГО."
+        client_instruction = (
+            "✅ Действие: Принять на Проверку Качества (ПК).\n"
+            "📄 [Оформите Акт приема на ГО](https://docs.google.com/spreadsheets/d/1kW5teyH7MSUO-kaHb2hvPvKmWYfwZporA12UzLmulWw/edit?usp=sharing)"
+        )
     elif days_int <= 365:
         status = "repair"
         action_text = "✅ Принять на Гарантийный ремонт (до 1 года)"
-        client_instruction = "✅ Действие: Принять на Гарантийный ремонт.\n📄 Оформите Акт приема на ГО."
+        client_instruction = (
+            "✅ Действие: Принять на Гарантийный ремонт.\n"
+            "📄 [Оформите Акт приема на ГО](https://docs.google.com/spreadsheets/d/1kW5teyH7MSUO-kaHb2hvPvKmWYfwZporA12UzLmulWw/edit?usp=sharing)"
+        )
     else:
         status = "expired"
         action_text = "⚠️ Гарантия истекла (более 1 года)"
         client_instruction = "⚠️ Внимание: Гарантия истекла."
+
 
     # Сохраняем статус в БД
     await update_claim_status(internal_id, status)

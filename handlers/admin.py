@@ -11,6 +11,31 @@ from states import AdminActionFSM, SuperAdminFSM
 
 router = Router()
 
+# ==========================================
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ПРОВЕРКИ ДОСТУПА
+# ==========================================
+
+async def check_admin_access(admin_id: int, claim_category: str) -> bool:
+    """
+    Проверяет, имеет ли админ право обрабатывать заявку данной категории.
+    - super_admin → полный доступ
+    - admin_tech → только 'tech'
+    - admin_acc → только 'acc'
+    """
+    role = await get_user_role(admin_id)
+    if role == 'super_admin':
+        return True
+    if role == 'admin_tech' and claim_category == 'tech':
+        return True
+    if role == 'admin_acc' and claim_category == 'acc':
+        return True
+    return False
+
+
+# ==========================================
+# ОДОБРЕНИЕ ЗАЯВКИ (для аксессуаров)
+# ==========================================
+
 @router.callback_query(F.data.startswith("adm_approve_"))
 async def admin_approve(cb: CallbackQuery):
     try:
@@ -20,6 +45,11 @@ async def admin_approve(cb: CallbackQuery):
         claim = await get_claim(claim_id)
         if not claim:
             await cb.answer("Заявка не найдена", show_alert=True)
+            return
+        
+        # 🔒 ПРОВЕРКА ДОСТУПА
+        if not await check_admin_access(cb.from_user.id, claim['category']):
+            await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
             return
             
         old_status = claim.get('status', "pending")
@@ -47,12 +77,29 @@ async def admin_approve(cb: CallbackQuery):
         print(f"Ошибка при одобрении: {e}")
         await cb.answer("Произошла ошибка при обработке.")
 
+
+# ==========================================
+# ОТКЛОНЕНИЕ ЗАЯВКИ
+# ==========================================
+
 @router.callback_query(F.data.startswith("adm_reject_"))
 async def admin_reject_start(cb: CallbackQuery, state: FSMContext):
     claim_id = int(cb.data.split("_")[-1])
-    await state.update_data(reject_claim_id=claim_id)
+    
+    # 🔒 ПРОВЕРКА ДОСТУПА перед началом отклонения
+    claim = await get_claim(claim_id)
+    if not claim:
+        await cb.answer("Заявка не найдена", show_alert=True)
+        return
+    
+    if not await check_admin_access(cb.from_user.id, claim['category']):
+        await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
+        return
+    
+    await state.update_data(reject_claim_id=claim_id, claim_category=claim['category'])
     await cb.message.answer("📝 Введите причину отказа:")
     await state.set_state(AdminActionFSM.reject_comment)
+
 
 @router.message(AdminActionFSM.reject_comment)
 async def admin_reject_finish(message: Message, state: FSMContext):
@@ -63,10 +110,16 @@ async def admin_reject_finish(message: Message, state: FSMContext):
         await state.clear()
         return
     
+    # 🔒 Дополнительная проверка (на всякий случай)
+    claim = await get_claim(claim_id)
+    if claim and not await check_admin_access(message.from_user.id, claim['category']):
+        await message.answer("⛔ У вас нет прав для обработки этой заявки.")
+        await state.clear()
+        return
+    
     comment = message.text
     full_name = message.from_user.full_name or "Админ"
     
-    claim = await get_claim(claim_id)
     old_status = claim.get('status', "pending") if claim else "pending"
     display_id = claim.get('display_id', f'#{claim_id}') if claim else f'#{claim_id}'
     
@@ -85,6 +138,11 @@ async def admin_reject_finish(message: Message, state: FSMContext):
             )
         except: pass
 
+
+# ==========================================
+# ПТВ — ВОЗВРАТ/ОБМЕН
+# ==========================================
+
 @router.callback_query(F.data.startswith("adm_ptv_return_"))
 async def admin_ptv_return(cb: CallbackQuery):
     try:
@@ -94,6 +152,11 @@ async def admin_ptv_return(cb: CallbackQuery):
         claim = await get_claim(claim_id)
         if not claim:
             await cb.answer("Заявка не найдена", show_alert=True)
+            return
+        
+        # 🔒 ПРОВЕРКА ДОСТУПА (ПТВ — это техника)
+        if not await check_admin_access(cb.from_user.id, claim['category']):
+            await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
             return
             
         old_status = claim.get('status', "pending")
@@ -128,6 +191,11 @@ async def admin_ptv_return(cb: CallbackQuery):
         print(f"Ошибка: {e}")
         await cb.answer("Ошибка обработки")
 
+
+# ==========================================
+# ПТВ — ГАРАНТИЙНОЕ ОБСЛУЖИВАНИЕ
+# ==========================================
+
 @router.callback_query(F.data.startswith("adm_ptv_repair_"))
 async def admin_ptv_repair(cb: CallbackQuery):
     try:
@@ -137,6 +205,11 @@ async def admin_ptv_repair(cb: CallbackQuery):
         claim = await get_claim(claim_id)
         if not claim:
             await cb.answer("Заявка не найдена", show_alert=True)
+            return
+        
+        # 🔒 ПРОВЕРКА ДОСТУПА
+        if not await check_admin_access(cb.from_user.id, claim['category']):
+            await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
             return
             
         old_status = claim.get('status', "pending")
@@ -169,18 +242,34 @@ async def admin_ptv_repair(cb: CallbackQuery):
         print(f"Ошибка: {e}")
         await cb.answer("Ошибка обработки")
 
+
+# ==========================================
+# ПАНЕЛЬ АДМИНИСТРАТОРА — ТОЛЬКО SUPER_ADMIN
+# ==========================================
+
 @router.message(F.text == "/admin_panel")
 async def admin_panel(message: Message):
     user_id = message.from_user.id
     role = await get_user_role(user_id)
     
+    # 🔒 Только супер-админ может вызывать /admin_panel
     if role == 'super_admin':
         await message.answer("🛡 Панель супер-админа:", reply_markup=get_super_admin_menu())
     else:
-        await message.answer("⛔ Доступ запрещен.")
+        await message.answer("⛔ Доступ запрещен. Команда только для супер-администраторов.")
+
+
+# ==========================================
+# УПРАВЛЕНИЕ АДМИНАМИ (только super_admin)
+# ==========================================
 
 @router.callback_query(F.data == "sa_add_admin_menu")
 async def sa_add_menu(cb: CallbackQuery, state: FSMContext):
+    role = await get_user_role(cb.from_user.id)
+    if role != 'super_admin':
+        await cb.answer("⛔ Только супер-админ", show_alert=True)
+        return
+        
     await state.clear()
     await cb.message.edit_text(
         "👮 **Назначение админа**\n\n"
@@ -246,6 +335,11 @@ async def sa_assign_role(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "sa_del_admin_menu")
 async def sa_del_menu(cb: CallbackQuery, state: FSMContext):
+    role = await get_user_role(cb.from_user.id)
+    if role != 'super_admin':
+        await cb.answer("⛔ Только супер-админ", show_alert=True)
+        return
+        
     await state.clear()
     await cb.message.edit_text(
         "🗑 **Удаление админа**\n\nВведите ID пользователя, которого нужно лишить прав."

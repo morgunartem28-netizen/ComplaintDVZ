@@ -53,6 +53,7 @@ def get_super_admin_menu():
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👮 Назначить админа", callback_data="sa_add_admin_menu")],
         [InlineKeyboardButton(text="🗑 Удалить админа", callback_data="sa_del_admin_menu")],
+        [InlineKeyboardButton(text="📋 Список админов", callback_data="sa_list_admins")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="sa_stats_menu")],
         [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="sa_clear_db")]
     ])
