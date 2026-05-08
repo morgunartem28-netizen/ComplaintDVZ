@@ -7,6 +7,8 @@ from middlewares import UpdatesLoggingMiddleware
 from handlers.common import router as common_router
 from handlers.accessories import router as acc_router
 from handlers.technics import router as tech_router
+from handlers.tradein import router as tradein_router
+from handlers.complaint import router as complaint_router
 from handlers.admin import router as admin_router
 from handlers.super_admin import router as super_admin_router
 
@@ -34,6 +36,8 @@ dp.update.middleware(UpdatesLoggingMiddleware())
 dp.include_router(common_router)
 dp.include_router(acc_router)
 dp.include_router(tech_router)
+dp.include_router(tradein_router)
+dp.include_router(complaint_router)
 dp.include_router(admin_router)
 dp.include_router(super_admin_router)
 

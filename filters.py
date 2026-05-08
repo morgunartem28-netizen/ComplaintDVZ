@@ -19,3 +19,15 @@ class IsAccAdmin(BaseFilter):
         user_id = event.from_user.id
         role = await get_user_role(user_id)
         return role in ['super_admin', 'admin_acc']
+
+class IsTradeinAdmin(BaseFilter):
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        user_id = event.from_user.id
+        role = await get_user_role(user_id)
+        return role in ['super_admin', 'admin_tradein']
+
+class IsComplaintAdmin(BaseFilter):
+    async def __call__(self, event: Message | CallbackQuery) -> bool:
+        user_id = event.from_user.id
+        role = await get_user_role(user_id)
+        return role in ['super_admin', 'admin_complaint']

@@ -39,7 +39,6 @@ async def sa_list_admins(cb: CallbackQuery):
         text += "👑 **Супер-админы:**\n"
         if admins['super_admin']:
             for admin_id, _ in admins['super_admin']:
-                # Пытаемся получить имя пользователя
                 try:
                     chat = await bot.get_chat(admin_id)
                     name = chat.full_name or chat.username or "Без имени"
@@ -91,6 +90,36 @@ async def sa_list_admins(cb: CallbackQuery):
                     text += f"  • `{admin_id}` — (неизвестно)\n"
         else:
             text += "  _Нет назначенных админов по аксессуарам_\n"
+        
+        text += "\n"
+        
+        # Админы trade-in
+        text += "🔄 **Админы по Trade-in:**\n"
+        if admins['admin_tradein']:
+            for admin_id, _ in admins['admin_tradein']:
+                try:
+                    chat = await bot.get_chat(admin_id)
+                    name = chat.full_name or chat.username or "Без имени"
+                    text += f"  • `{admin_id}` — {name}\n"
+                except Exception:
+                    text += f"  • `{admin_id}` — (неизвестно)\n"
+        else:
+            text += "  _Нет назначенных админов по Trade-in_\n"
+        
+        text += "\n"
+        
+        # Админы по остаткам (complaint)
+        text += "📦 **Админы по остаткам:**\n"
+        if admins['admin_complaint']:
+            for admin_id, _ in admins['admin_complaint']:
+                try:
+                    chat = await bot.get_chat(admin_id)
+                    name = chat.full_name or chat.username or "Без имени"
+                    text += f"  • `{admin_id}` — {name}\n"
+                except Exception:
+                    text += f"  • `{admin_id}` — (неизвестно)\n"
+        else:
+            text += "  _Нет назначенных админов по остаткам_\n"
         
         await cb.message.edit_text(
             text,
@@ -192,7 +221,7 @@ async def show_stats_page(cb: CallbackQuery, page: int):
         for i, point in enumerate(page_data, start_idx + 1):
             text += (
                 f"{i}. **{point['name']}**\n"
-                f" 🛠 ПТВ: {point['ptv']} | 🆕 Новое: {point['new']} | 🎧 Акс: {point['acc']}\n"
+                f" 🛠 ПТВ: {point['ptv']} | 🆕 Новое: {point['new']} | 🎧 Акс: {point['acc']} | 🔄 Trade-in: {point['tradein']}\n"
                 f" 🔢 **Всего:** {point['total']}\n\n"
             )
 

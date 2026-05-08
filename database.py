@@ -1,10 +1,10 @@
 import aiosqlite
 import csv
 import io
+from pathlib import Path
 from datetime import datetime
 from config import DB_NAME, ADMIN_IDS
 
-# Импортируем openpyxl с обработкой ошибки, если её нет
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -12,18 +12,49 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
-# ID супер-админов из .env (список)
 ENV_SUPER_ADMIN_IDS = ADMIN_IDS if ADMIN_IDS else []
 
-# ПРЕФИКСЫ НУМЕРАЦИИ
-PREFIX_TECH = "Т"
-PREFIX_ACC = "А"
+def _quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+async def _sync_archive_schema(db: aiosqlite.Connection):
+    claims_info = await (await db.execute("PRAGMA table_info(claims)")).fetchall()
+    archive_info = await (await db.execute("PRAGMA table_info(claims_archive)")).fetchall()
+
+    claims_columns = {row[1]: row for row in claims_info}
+    archive_columns = {row[1] for row in archive_info}
+    missing_columns = [name for name in claims_columns if name not in archive_columns]
+
+    for column_name in missing_columns:
+        _, _, column_type, not_null, default_value, _ = claims_columns[column_name]
+        quoted_name = _quote_identifier(column_name)
+
+        parts = [f"ALTER TABLE claims_archive ADD COLUMN {quoted_name}"]
+        if column_type:
+            parts.append(column_type)
+        # SQLite не позволяет безопасно добавить NOT NULL колонку без DEFAULT
+        # в уже существующую таблицу с данными.
+        if not_null and default_value is not None:
+            parts.append("NOT NULL")
+        if default_value is not None:
+            parts.append(f"DEFAULT {default_value}")
+
+        await db.execute(" ".join(parts))
 
 async def archive_old_claims(days: int = 365):
     async with aiosqlite.connect(DB_NAME) as db:
+        await _sync_archive_schema(db)
         await db.execute(f"""
-            INSERT INTO claims_archive 
-            SELECT * FROM claims 
+            INSERT INTO claims_archive (
+                id, display_id, user_id, category, sub_category, brand,
+                defect_desc, purchase_date, client_wish, photo_id, status,
+                admin_comment, admin_name, client_name, tg_name, created_at
+            )
+            SELECT
+                id, display_id, user_id, category, sub_category, brand,
+                defect_desc, purchase_date, client_wish, photo_id, status,
+                admin_comment, admin_name, client_name, tg_name, created_at
+            FROM claims
             WHERE date(created_at) < date('now', '-{days} days')
         """)
         await db.execute(f"""
@@ -37,7 +68,6 @@ async def archive_old_claims(days: int = 365):
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        # Основная таблица заявок
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -60,6 +90,7 @@ async def init_db():
                 admin_comment TEXT,
                 admin_name TEXT,
                 client_name TEXT DEFAULT 'Не указано',
+                tg_name TEXT DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -96,27 +127,75 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS claims_archive AS SELECT * FROM claims WHERE 1=0
         """)
-        # Таблица-счётчик для нумерации Т/А
         await db.execute("""
             CREATE TABLE IF NOT EXISTS claim_counters (
                 category TEXT PRIMARY KEY,
                 last_number INTEGER DEFAULT 0
             )
         """)
-        # Инициализируем счётчики если их нет
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_claims_display_id ON claims(display_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_claims_user_id ON claims(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_claims_category_status ON claims(category, status)")
         await db.execute("""
             INSERT OR IGNORE INTO claim_counters (category, last_number) VALUES ('tech', 0)
         """)
         await db.execute("""
             INSERT OR IGNORE INTO claim_counters (category, last_number) VALUES ('acc', 0)
         """)
-        # Авто-назначение супер-админов из .env
+        await db.execute("""
+            INSERT OR IGNORE INTO claim_counters (category, last_number) VALUES ('tradein', 0)
+        """)
+        await db.execute("""
+            INSERT OR IGNORE INTO claim_counters (category, last_number) VALUES ('complaint', 0)
+        """)
         if ENV_SUPER_ADMIN_IDS:
             for admin_id in ENV_SUPER_ADMIN_IDS:
                 await db.execute(
                     "INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)",
                     (admin_id, 'super_admin')
                 )
+        await db.commit()
+    await apply_migrations()
+
+async def apply_migrations():
+    migrations_dir = Path(__file__).resolve().parent / "migrations"
+    if not migrations_dir.exists():
+        return
+
+    migration_files = sorted(migrations_dir.glob("*.sql"))
+    if not migration_files:
+        return
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        for migration_file in migration_files:
+            version = migration_file.name
+            cursor = await db.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = ?",
+                (version,)
+            )
+            exists = await cursor.fetchone()
+            if exists:
+                continue
+
+            sql = migration_file.read_text(encoding="utf-8").strip()
+            if sql:
+                try:
+                    await db.executescript(sql)
+                except aiosqlite.OperationalError as exc:
+                    # Позволяем идемпотентно пережить миграции вида ALTER TABLE ... ADD COLUMN
+                    # если колонка уже создана в новой схеме.
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            await db.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?)",
+                (version,)
+            )
         await db.commit()
 
 async def get_user_role(user_id: int) -> str:
@@ -164,27 +243,32 @@ async def get_next_display_id(category: str) -> str:
             (next_num, category)
         )
         await db.commit()
-        prefix = PREFIX_TECH if category == 'tech' else PREFIX_ACC
+        
+        prefix_map = {
+            'tech': 'Т',
+            'acc': 'А',
+            'tradein': 'В',
+            'complaint': 'С'
+        }
+        prefix = prefix_map.get(category, '?')
+        
         return f"{prefix}{next_num}"
 
+
 async def create_claim(data: dict, user_id: int) -> tuple:
-    """
-    Создаёт заявку.
-    ОЖИДАЕМЫЕ КЛЮЧИ В data:
-    - category, sub_category, brand, defect, purchase_date, client_wish, photo, client_name
-    """
     category = data['category']
     display_id = await get_next_display_id(category)
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("""
             INSERT INTO claims (
                 display_id, user_id, category, sub_category, brand, 
-                defect_desc, purchase_date, client_wish, photo_id, client_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                defect_desc, purchase_date, client_wish, photo_id, client_name, tg_name
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             display_id, user_id, data['category'], data.get('sub_category'), 
             data.get('brand'), data.get('defect'), data.get('purchase_date'), 
-            data.get('client_wish'), data['photo'], data.get('client_name', 'Не указано')
+            data.get('client_wish'), data['photo'], data.get('client_name', 'Не указано'),
+            data.get('tg_name', '')
         ))
         await db.commit()
         return cursor.lastrowid, display_id
@@ -207,6 +291,42 @@ async def get_claim_by_display_id(display_id: str):
             return None
         return dict(row)
 
+async def find_claim_by_display_id_or_imei(query: str):
+    query_norm = (query or "").strip().upper()
+    if not query_norm:
+        return None
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT *
+            FROM claims
+            WHERE UPPER(display_id) = ?
+               OR (category = 'tech' AND UPPER(brand) LIKE ?)
+               OR (category = 'tech' AND UPPER(defect_desc) LIKE ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (query_norm, f"%IMEI: {query_norm}%", f"%IMEI: {query_norm}%")
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+async def get_claim_by_display_id_for_user(display_id: str, user_id: int):
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM claims WHERE display_id = ? AND user_id = ?",
+            (display_id, user_id)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
 async def update_claim_status(claim_id: int, status: str, comment: str = None, admin_name: str = None):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -214,6 +334,45 @@ async def update_claim_status(claim_id: int, status: str, comment: str = None, a
             (status, comment, admin_name, claim_id)
         )
         await db.commit()
+
+async def try_update_claim_status(claim_id: int, status: str, comment: str = None, admin_name: str = None) -> tuple:
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        
+        try:
+            cursor = await db.execute(
+                "SELECT * FROM claims WHERE id = ?",
+                (claim_id,)
+            )
+            row = await cursor.fetchone()
+            
+            if not row:
+                await db.commit()
+                return None, None
+            
+            claim = dict(row)
+            current_status = claim.get('status', 'pending')
+            
+            if current_status != 'pending':
+                await db.commit()
+                return False, claim
+            
+            await db.execute(
+                "UPDATE claims SET status = ?, admin_comment = ?, admin_name = ? WHERE id = ?",
+                (status, comment, admin_name, claim_id)
+            )
+            await db.commit()
+            
+            claim['status'] = status
+            claim['admin_comment'] = comment
+            claim['admin_name'] = admin_name
+            
+            return True, claim
+            
+        except Exception:
+            await db.rollback()
+            raise
 
 async def add_claim_history(claim_id: int, display_id: str, old_status: str, new_status: str, admin_id: int, admin_name: str, comment: str = None):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -234,93 +393,87 @@ async def get_claim_history(claim_id: int):
         return await cursor.fetchall()
 
 
-# ==========================================
-# ИСПРАВЛЕННАЯ ФУНКЦИЯ: Получение админов по роли
-# ==========================================
-
 async def get_admins_by_role(role_prefix: str):
-    """
-    Получает список ID администраторов по роли.
-    - 'admin_acc' → админы аксессуаров + все супер-админы
-    - 'admin_tech' → админы техники + все супер-админы  
-    - 'super_admin' → только супер-админы
-    """
     async with aiosqlite.connect(DB_NAME) as db:
         if role_prefix == 'super_admin':
-            # Только супер-админы (из БД + из .env)
             cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
             rows = await cursor.fetchall()
             db_admins = [row[0] for row in rows]
-            # Объединяем с ENV, убираем дубликаты
             return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
         
         elif role_prefix == 'admin_acc':
-            # Админы аксессуаров + супер-админы
-            cursor = await db.execute(
-                "SELECT user_id FROM users WHERE role = 'admin_acc'"
-            )
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_acc'")
             acc_admins = [row[0] for row in await cursor.fetchall()]
-            
             cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
             super_admins = [row[0] for row in await cursor.fetchall()]
-            
             return list(set(acc_admins + super_admins + ENV_SUPER_ADMIN_IDS))
         
         elif role_prefix == 'admin_tech':
-            # Админы техники + супер-админы
-            cursor = await db.execute(
-                "SELECT user_id FROM users WHERE role = 'admin_tech'"
-            )
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_tech'")
             tech_admins = [row[0] for row in await cursor.fetchall()]
-            
             cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
             super_admins = [row[0] for row in await cursor.fetchall()]
-            
             return list(set(tech_admins + super_admins + ENV_SUPER_ADMIN_IDS))
         
+        elif role_prefix == 'admin_tradein':
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_tradein'")
+            tradein_admins = [row[0] for row in await cursor.fetchall()]
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            super_admins = [row[0] for row in await cursor.fetchall()]
+            return list(set(tradein_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+        
+        elif role_prefix == 'admin_complaint':
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_complaint'")
+            complaint_admins = [row[0] for row in await cursor.fetchall()]
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            super_admins = [row[0] for row in await cursor.fetchall()]
+            return list(set(complaint_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+        
         else:
-            # Для любой другой роли — точное совпадение
             cursor = await db.execute("SELECT user_id FROM users WHERE role = ?", (role_prefix,))
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
 
-# ==========================================
-# НОВАЯ ФУНКЦИЯ: Список всех администраторов
-# ==========================================
-
 async def get_all_admins_list() -> dict:
-    """
-    Возвращает словарь со списками администраторов по ролям.
-    Формат: {'super_admin': [(id, name), ...], 'admin_tech': [...], 'admin_acc': [...]}
-    """
     async with aiosqlite.connect(DB_NAME) as db:
         result = {
             'super_admin': [],
             'admin_tech': [],
-            'admin_acc': []
+            'admin_acc': [],
+            'admin_tradein': [],
+            'admin_complaint': []
         }
         
-        # Супер-админы из БД
         cursor = await db.execute(
             "SELECT user_id, role FROM users WHERE role = 'super_admin' ORDER BY user_id"
         )
         for row in await cursor.fetchall():
             result['super_admin'].append((row[0], None))
         
-        # Админы техники
         cursor = await db.execute(
             "SELECT user_id, role FROM users WHERE role = 'admin_tech' ORDER BY user_id"
         )
         for row in await cursor.fetchall():
             result['admin_tech'].append((row[0], None))
         
-        # Админы аксессуаров
         cursor = await db.execute(
             "SELECT user_id, role FROM users WHERE role = 'admin_acc' ORDER BY user_id"
         )
         for row in await cursor.fetchall():
             result['admin_acc'].append((row[0], None))
+        
+        cursor = await db.execute(
+            "SELECT user_id, role FROM users WHERE role = 'admin_tradein' ORDER BY user_id"
+        )
+        for row in await cursor.fetchall():
+            result['admin_tradein'].append((row[0], None))
+        
+        cursor = await db.execute(
+            "SELECT user_id, role FROM users WHERE role = 'admin_complaint' ORDER BY user_id"
+        )
+        for row in await cursor.fetchall():
+            result['admin_complaint'].append((row[0], None))
         
         return result
 
@@ -357,7 +510,17 @@ async def get_stats_by_points():
                 (uid,)
             )
             acc = (await cursor_acc.fetchone())[0]
-            total = ptv + new_dev + acc
+            cursor_tradein = await db.execute(
+                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND category = 'tradein'",
+                (uid,)
+            )
+            tradein = (await cursor_tradein.fetchone())[0]
+            cursor_complaint = await db.execute(
+                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND category = 'complaint'",
+                (uid,)
+            )
+            complaint = (await cursor_complaint.fetchone())[0]
+            total = ptv + new_dev + acc + tradein + complaint
             if total > 0:
                 stats_list.append({
                     'user_id': uid,
@@ -365,6 +528,8 @@ async def get_stats_by_points():
                     'ptv': ptv,
                     'new': new_dev,
                     'acc': acc,
+                    'tradein': tradein,
+                    'complaint': complaint,
                     'total': total
                 })
         stats_list.sort(key=lambda x: x['total'], reverse=True)
@@ -382,10 +547,6 @@ async def get_pending_claims():
         return await cursor.fetchall()
 
 async def export_stats_to_excel() -> bytes:
-    """
-    Экспортирует все заявки в формат .xlsx с красивым форматированием.
-    Возвращает байты файла.
-    """
     if not OPENPYXL_AVAILABLE:
         return b"Error: openpyxl library not installed. Please run 'pip install openpyxl'"
     
@@ -393,7 +554,7 @@ async def export_stats_to_excel() -> bytes:
         cursor = await db.execute("""
             SELECT id, display_id, user_id, category, sub_category, brand, 
                    defect_desc, purchase_date, client_wish, status, admin_name, 
-                   client_name, created_at 
+                   client_name, tg_name, created_at 
             FROM claims 
             ORDER BY created_at DESC
         """)
@@ -406,10 +567,9 @@ async def export_stats_to_excel() -> bytes:
         headers = [
             'ID', 'Номер заявки', 'User ID', 'Категория', 'Подкатегория', 
             'Бренд', 'Дефект', 'Дата покупки', 'Пожелание клиента', 
-            'Статус', 'Админ', 'Клиент', 'Дата создания'
+            'Статус', 'Админ', 'Клиент', 'Имя в Telegram', 'Дата создания'
         ]
         
-        # Стили
         header_font = Font(bold=True, color="FFFFFF", size=12)
         header_bg = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         thin_border = Border(
@@ -419,10 +579,8 @@ async def export_stats_to_excel() -> bytes:
         center_align = Alignment(horizontal='center', vertical='center')
         left_align = Alignment(horizontal='left', vertical='center')
         
-        # Ширина колонок
-        col_widths = [5, 10, 10, 15, 20, 25, 40, 15, 20, 15, 15, 20, 20]
+        col_widths = [5, 10, 10, 15, 20, 25, 40, 15, 20, 15, 15, 20, 25, 20]
         
-        # 1. Заголовки
         for col_num, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col_num, value=header)
             cell.font = header_font
@@ -432,7 +590,6 @@ async def export_stats_to_excel() -> bytes:
             if col_num <= len(col_widths):
                 ws.column_dimensions[chr(64 + col_num)].width = col_widths[col_num - 1]
         
-        # 2. Данные
         for row_idx, row_data in enumerate(rows, 2):
             for col_num, value in enumerate(row_data, 1):
                 cell_value = "" if value is None else str(value)
@@ -450,7 +607,7 @@ async def export_stats_to_csv() -> bytes:
         cursor = await db.execute("""
             SELECT id, display_id, user_id, category, sub_category, brand, 
                    defect_desc, purchase_date, client_wish, status, admin_name, 
-                   client_name, created_at 
+                   client_name, tg_name, created_at 
             FROM claims 
             ORDER BY created_at DESC
         """)
@@ -460,7 +617,7 @@ async def export_stats_to_csv() -> bytes:
         headers = [
             'ID', 'Номер заявки', 'User ID', 'Категория', 'Подкатегория', 
             'Бренд', 'Дефект', 'Дата покупки', 'Пожелание клиента', 
-            'Статус', 'Админ', 'Клиент', 'Дата создания'
+            'Статус', 'Админ', 'Клиент', 'Имя в Telegram', 'Дата создания'
         ]
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
         writer.writerow(headers)
@@ -476,7 +633,7 @@ async def get_claims_count() -> int:
 async def get_archive_count() -> int:
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute("SELECT COUNT(*) FROM claims_archive")
-        return (await cursor_fetchone())[0]
+        return (await cursor.fetchone())[0]
 
 async def clear_all_claims():
     async with aiosqlite.connect(DB_NAME) as db:
@@ -485,4 +642,6 @@ async def clear_all_claims():
         await db.execute("DELETE FROM claim_history")
         await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tech'")
         await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'acc'")
+        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tradein'")
+        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'complaint'")
         await db.commit()

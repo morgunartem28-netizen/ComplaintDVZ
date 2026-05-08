@@ -3,10 +3,25 @@
 
 # Database
 *.db
+*.sqlite
+*.sqlite3
 
 # Python cache
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# OS artifacts
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
