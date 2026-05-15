@@ -4,11 +4,18 @@ from aiogram.fsm.context import FSMContext
 from database import (
     get_user_role, update_claim_status, get_claim, log_action, 
     set_user_role, add_claim_history, get_admins_by_role,
-    try_update_claim_status, get_stats_overview, get_pending_claims, get_all_admins_list
+    try_update_claim_status,
 )
 from keyboards import (
-    get_super_admin_menu, get_role_selection_buttons, get_main_menu, 
-    get_stock_adjustment_request_buttons, get_admin_panel_quick_actions
+    get_admin_panel_menu, get_role_selection_buttons, get_main_menu,
+    get_stock_adjustment_request_buttons,
+)
+from utils.admin_panel import (
+    ACCESS_DENIED,
+    ACCESS_DENIED_SHORT,
+    is_super_admin,
+    send_panel,
+    show_panel,
 )
 from bot_instance import bot
 from states import AdminActionFSM, SuperAdminFSM
@@ -340,63 +347,36 @@ async def admin_ptv_repair(cb: CallbackQuery):
 # ==========================================
 # ПАНЕЛЬ АДМИНИСТРАТОРА
 # ==========================================
-@router.message(F.text == "/admin_panel")
+@router.message(F.text.in_({"/admin_panel", "/panel"}))
 async def admin_panel(message: Message):
-    user_id = message.from_user.id
-    role = await get_user_role(user_id)
-    
-    if role == 'super_admin':
-        overview = await get_stats_overview()
-        pending_overdue = await get_pending_claims()
-        admins = await get_all_admins_list()
-        admin_counts = {
-            "super_admin": len(admins.get("super_admin", [])),
-            "admin_tech": len(admins.get("admin_tech", [])),
-            "admin_acc": len(admins.get("admin_acc", [])),
-            "admin_tradein": len(admins.get("admin_tradein", [])),
-            "admin_complaint": len(admins.get("admin_complaint", []))
-        }
-
-        dashboard_text = (
-            "Панель супер-админа\n\n"
-            "Краткая статистика:\n"
-            f"- Всего заявок: {overview.get('total', 0)}\n"
-            f"- Ожидают решения: {overview.get('pending', 0)}\n"
-            f"- Решено: {overview.get('resolved', 0)}\n"
-            f"- Просроченные (>2 ч): {len(pending_overdue)}\n\n"
-            "Активные администраторы по ролям:\n"
-            f"- Супер-админы: {admin_counts['super_admin']}\n"
-            f"- Админы (техника): {admin_counts['admin_tech']}\n"
-            f"- Админы (аксессуары): {admin_counts['admin_acc']}\n"
-            f"- Админы (Trade-in): {admin_counts['admin_tradein']}\n"
-            f"- Админы (Complaint): {admin_counts['admin_complaint']}\n\n"
-            "Быстрые действия:"
-        )
-        await message.answer(dashboard_text, reply_markup=get_admin_panel_quick_actions())
-    else:
-        await message.answer("⛔ Доступ запрещен. Команда только для супер-администраторов.")
-
-
-@router.callback_query(F.data == "sa_open_full_menu")
-async def sa_open_full_menu(cb: CallbackQuery):
-    role = await get_user_role(cb.from_user.id)
-    if role != 'super_admin':
-        await cb.answer("⛔ Только супер-админ", show_alert=True)
+    if not await is_super_admin(message.from_user.id):
+        await message.answer(ACCESS_DENIED)
         return
-    await cb.message.edit_text(
-        "Панель супер-админа. Выберите действие:",
-        reply_markup=get_super_admin_menu()
-    )
-    await cb.answer()
+    await send_panel(message)
+
+
+@router.callback_query(F.data == "panel_home")
+async def panel_home(cb: CallbackQuery):
+    if not await is_super_admin(cb.from_user.id):
+        await cb.answer(ACCESS_DENIED_SHORT, show_alert=True)
+        return
+    await show_panel(cb)
+
+
+@router.callback_query(F.data == "panel_refresh")
+async def panel_refresh(cb: CallbackQuery):
+    if not await is_super_admin(cb.from_user.id):
+        await cb.answer(ACCESS_DENIED_SHORT, show_alert=True)
+        return
+    await show_panel(cb, toast="Обновлено")
 
 # ==========================================
 # УПРАВЛЕНИЕ АДМИНАМИ
 # ==========================================
 @router.callback_query(F.data == "sa_add_admin_menu")
 async def sa_add_menu(cb: CallbackQuery, state: FSMContext):
-    role = await get_user_role(cb.from_user.id)
-    if role != 'super_admin':
-        await cb.answer("⛔ Только супер-админ", show_alert=True)
+    if not await is_super_admin(cb.from_user.id):
+        await cb.answer(ACCESS_DENIED_SHORT, show_alert=True)
         return
     
     await state.clear()
@@ -450,7 +430,7 @@ async def sa_assign_role(cb: CallbackQuery, state: FSMContext):
             "admin_tech": "Техника",
             "admin_acc": "Аксессуары",
             "admin_tradein": "Trade-in",
-            "admin_complaint": "Complaint",
+            "admin_complaint": "Остатки",
             "super_admin": "Супер-админ"
         }
         
@@ -458,7 +438,7 @@ async def sa_assign_role(cb: CallbackQuery, state: FSMContext):
             f"✅ **Админ назначен!**\n\n"
             f"🆔 ID: `{target_id}`\n"
             f"🛡 Роль: **{role_names[new_role]}**",
-            reply_markup=get_super_admin_menu(),
+            reply_markup=get_admin_panel_menu(),
             parse_mode="Markdown"
         )
         await state.clear()
@@ -476,14 +456,14 @@ async def sa_assign_role(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "sa_del_admin_menu")
 async def sa_del_menu(cb: CallbackQuery, state: FSMContext):
-    role = await get_user_role(cb.from_user.id)
-    if role != 'super_admin':
-        await cb.answer("⛔ Только супер-админ", show_alert=True)
+    if not await is_super_admin(cb.from_user.id):
+        await cb.answer(ACCESS_DENIED_SHORT, show_alert=True)
         return
     
     await state.clear()
     await cb.message.edit_text(
-        "🗑 **Удаление админа**\n\nВведите ID пользователя, которого нужно лишить прав."
+        "🗑 **Снятие прав**\n\nВведите ID пользователя, которого нужно лишить прав.",
+        parse_mode="Markdown",
     )
     await state.set_state(SuperAdminFSM.waiting_for_id_delete)
 
@@ -507,7 +487,7 @@ async def sa_del_admin_finish(message: Message, state: FSMContext):
     
     await message.answer(
         f"✅ Пользователь {uid} лишен прав.",
-        reply_markup=get_super_admin_menu()
+        reply_markup=get_admin_panel_menu()
     )
     
     try:

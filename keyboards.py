@@ -25,7 +25,7 @@ def get_acc_types():
 
 def get_tech_type_buttons():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛠 ПТВ", callback_data="tech_ptv")],
+        [InlineKeyboardButton(text="🛠 Б/У", callback_data="tech_ptv")],
         [InlineKeyboardButton(text="🆕 Новое устройство", callback_data="tech_new")]
     ])
     return kb
@@ -57,34 +57,34 @@ def get_tradein_admin_decision(claim_id: int):
     ])
     return kb
 
-def get_super_admin_menu():
+def get_admin_panel_menu():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👮 Назначить админа", callback_data="sa_add_admin_menu")],
-        [InlineKeyboardButton(text="🗑 Удалить админа", callback_data="sa_del_admin_menu")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="panel_refresh")],
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="sa_stats_menu"),
+            InlineKeyboardButton(text="📥 Excel", callback_data="stats_export_menu_panel"),
+        ],
+        [
+            InlineKeyboardButton(text="👮 Назначить", callback_data="sa_add_admin_menu"),
+            InlineKeyboardButton(text="🗑 Снять права", callback_data="sa_del_admin_menu"),
+        ],
         [InlineKeyboardButton(text="📋 Список админов", callback_data="sa_list_admins")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="sa_stats_menu")],
-        [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="sa_clear_db")]
+        [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="sa_clear_db")],
     ])
     return kb
 
 
-def get_admin_panel_quick_actions():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Назначить админа", callback_data="sa_add_admin_menu")],
-        [InlineKeyboardButton(text="Снять права", callback_data="sa_del_admin_menu")],
-        [InlineKeyboardButton(text="Список админов", callback_data="sa_list_admins")],
-        [InlineKeyboardButton(text="Статистика", callback_data="sa_stats_menu")],
-        [InlineKeyboardButton(text="Расширенное меню", callback_data="sa_open_full_menu")]
-    ])
-    return kb
+def get_super_admin_menu():
+    return get_admin_panel_menu()
 
 def get_role_selection_buttons():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛠 Техника (admin_tech)", callback_data="role_tech")],
-        [InlineKeyboardButton(text="🎧 Аксессуары (admin_acc)", callback_data="role_acc")],
-        [InlineKeyboardButton(text="🔄 Trade-in (admin_tradein)", callback_data="role_tradein")],
-        [InlineKeyboardButton(text="📦 Остатки (admin_complaint)", callback_data="role_complaint")],
-        [InlineKeyboardButton(text="👑 Супер-админ (super_admin)", callback_data="role_super")]
+        [InlineKeyboardButton(text="🛠 Техника", callback_data="role_tech")],
+        [InlineKeyboardButton(text="🎧 Аксессуары", callback_data="role_acc")],
+        [InlineKeyboardButton(text="🔄 Trade-in", callback_data="role_tradein")],
+        [InlineKeyboardButton(text="📦 Остатки", callback_data="role_complaint")],
+        [InlineKeyboardButton(text="👑 Супер-админ", callback_data="role_super")],
+        [InlineKeyboardButton(text="⬅️ На главную", callback_data="panel_home")],
     ])
     return kb
 
@@ -93,8 +93,18 @@ def get_stats_menu():
         [InlineKeyboardButton(text="📈 Общая статистика", callback_data="stats_overview")],
         [InlineKeyboardButton(text="🏢 Подробно по ТТ", callback_data="stats_points")],
         [InlineKeyboardButton(text="⏳ Просроченные заявки", callback_data="stats_pending")],
-        [InlineKeyboardButton(text="📥 Экспорт в CSV", callback_data="stats_export")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin")]
+        [InlineKeyboardButton(text="📥 Экспорт Excel", callback_data="stats_export_menu")],
+        [InlineKeyboardButton(text="⬅️ На главную", callback_data="panel_home")]
+    ])
+    return kb
+
+
+def get_export_period_buttons(back_callback: str = "panel_home"):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="За 7 дней", callback_data="stats_export_days_7")],
+        [InlineKeyboardButton(text="За 30 дней", callback_data="stats_export_days_30")],
+        [InlineKeyboardButton(text="За всё время", callback_data="stats_export_days_all")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)]
     ])
     return kb
 
@@ -119,7 +129,7 @@ def get_warranty_status_buttons():
 
 def get_back_to_admin():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ В меню админа", callback_data="back_to_admin")]
+        [InlineKeyboardButton(text="⬅️ На главную", callback_data="panel_home")]
     ])
     return kb
 

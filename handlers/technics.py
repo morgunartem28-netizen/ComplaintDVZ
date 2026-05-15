@@ -250,14 +250,14 @@ async def process_ptv_claim(message: Message, state: FSMContext, user):
         return
 
     await state.clear()
-    await message.answer(f"✅ Ваша заявка **{display_id}** (ПТВ) принята в обработку!", parse_mode="Markdown")
+    await message.answer(f"✅ Ваша заявка **{display_id}** (Б/У) принята в обработку!", parse_mode="Markdown")
 
     tt_link = f"tg://user?id={user.id}"
     tt_display = f"[{escape_markdown(user.full_name)}]({tt_link})"
     warranty_display = "Предоставлен" if warranty_status == "has_photo" else "Утерян"
     
     request_text = (
-        f"📱 **НОВАЯ ЗАЯВКА (ПТВ) {display_id}**\n"
+        f"📱 **НОВАЯ ЗАЯВКА (Б/У) {display_id}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 **Клиент:** {client_name}\n"
         f"📱 **Устройство:** {device_name}\n"

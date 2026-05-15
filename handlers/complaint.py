@@ -533,7 +533,7 @@ async def tech_adjustment_pull_data_decision(cb: CallbackQuery, state: FSMContex
         await state.update_data(return_imei=imei, return_purchase_date=purchase_date)
         if need_manual_nomenclature:
             await cb.message.answer(
-                "Для старой ПТВ заявки нужно вручную указать название техники:"
+                "Для старой Б/У заявки нужно вручную указать название техники:"
             )
             await state.set_state(TechAdjustmentFSM.return_nomenclature)
         else:
@@ -544,7 +544,7 @@ async def tech_adjustment_pull_data_decision(cb: CallbackQuery, state: FSMContex
         await state.update_data(exchange_imei=imei, exchange_purchase_date=purchase_date)
         if need_manual_nomenclature:
             await cb.message.answer(
-                "Для старой ПТВ заявки нужно вручную указать название техники:"
+                "Для старой Б/У заявки нужно вручную указать название техники:"
             )
             await state.set_state(TechAdjustmentFSM.exchange_nomenclature)
         else:

@@ -1,5 +1,4 @@
 import aiosqlite
-import csv
 import io
 from pathlib import Path
 from datetime import datetime
@@ -546,41 +545,81 @@ async def get_pending_claims():
         """)
         return await cursor.fetchall()
 
-async def export_stats_to_excel() -> bytes:
+async def export_stats_to_excel(days: int | None = None) -> bytes:
+    from utils.export_format import (
+        extract_imei,
+        extract_product_name,
+        format_category_ru,
+        format_defect_for_export,
+        format_status_ru,
+        format_datetime_export,
+        split_datetime_export,
+    )
+
     if not OPENPYXL_AVAILABLE:
         return b"Error: openpyxl library not installed. Please run 'pip install openpyxl'"
-    
+
+    base_query = """
+        SELECT
+            c.id, c.display_id, c.user_id, c.category, c.sub_category, c.brand,
+            c.defect_desc, c.purchase_date, c.client_wish, c.status, c.admin_name,
+            c.client_name, c.tg_name, c.created_at, rh.resolved_at
+        FROM claims c
+        LEFT JOIN (
+            SELECT claim_id, MAX(changed_at) AS resolved_at
+            FROM claim_history
+            WHERE old_status = 'pending' AND new_status != 'pending'
+            GROUP BY claim_id
+        ) rh ON rh.claim_id = c.id
+    """
+    if days:
+        query = base_query + " WHERE date(c.created_at) >= date('now', ?) ORDER BY c.created_at DESC"
+        params = (f"-{int(days)} days",)
+    else:
+        query = base_query + " ORDER BY c.created_at DESC"
+        params = ()
+
     async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
-            SELECT id, display_id, user_id, category, sub_category, brand, 
-                   defect_desc, purchase_date, client_wish, status, admin_name, 
-                   client_name, tg_name, created_at 
-            FROM claims 
-            ORDER BY created_at DESC
-        """)
+        cursor = await db.execute(query, params)
         rows = await cursor.fetchall()
-        
+
         wb = Workbook()
         ws = wb.active
         ws.title = "Отчет по заявкам"
-        
+
         headers = [
-            'ID', 'Номер заявки', 'User ID', 'Категория', 'Подкатегория', 
-            'Бренд', 'Дефект', 'Дата покупки', 'Пожелание клиента', 
-            'Статус', 'Админ', 'Клиент', 'Имя в Telegram', 'Дата создания'
+            "ID",
+            "Номер заявки",
+            "User ID",
+            "Категория",
+            "Подкатегория",
+            "Название товара",
+            "Дефект",
+            "IMEI",
+            "Дата покупки",
+            "Пожелание клиента",
+            "Статус",
+            "Ответственный",
+            "Клиент",
+            "Имя в Telegram",
+            "Дата создания",
+            "Дата решения",
+            "Время решения",
         ]
-        
+
         header_font = Font(bold=True, color="FFFFFF", size=12)
         header_bg = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         thin_border = Border(
-            left=Side(style='thin'), right=Side(style='thin'), 
-            top=Side(style='thin'), bottom=Side(style='thin')
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
         )
-        center_align = Alignment(horizontal='center', vertical='center')
-        left_align = Alignment(horizontal='left', vertical='center')
-        
-        col_widths = [5, 10, 10, 15, 20, 25, 40, 15, 20, 15, 15, 20, 25, 20]
-        
+        center_align = Alignment(horizontal="center", vertical="center")
+        left_align = Alignment(horizontal="left", vertical="center")
+
+        col_widths = [5, 10, 10, 14, 18, 25, 35, 18, 14, 20, 16, 18, 20, 22, 18, 14, 10]
+
         for col_num, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col_num, value=header)
             cell.font = header_font
@@ -589,41 +628,57 @@ async def export_stats_to_excel() -> bytes:
             cell.border = thin_border
             if col_num <= len(col_widths):
                 ws.column_dimensions[chr(64 + col_num)].width = col_widths[col_num - 1]
-        
-        for row_idx, row_data in enumerate(rows, 2):
-            for col_num, value in enumerate(row_data, 1):
+
+        for row_idx, row in enumerate(rows, 2):
+            (
+                claim_id,
+                display_id,
+                user_id,
+                category,
+                sub_category,
+                brand,
+                defect_desc,
+                purchase_date,
+                client_wish,
+                status,
+                admin_name,
+                client_name,
+                tg_name,
+                created_at,
+                resolved_at,
+            ) = row
+
+            resolved_date, resolved_time = split_datetime_export(resolved_at)
+            export_row = [
+                claim_id,
+                display_id,
+                user_id,
+                format_category_ru(category),
+                sub_category,
+                extract_product_name(brand, category),
+                format_defect_for_export(defect_desc, category, brand),
+                extract_imei(brand, defect_desc, category),
+                purchase_date,
+                client_wish,
+                format_status_ru(status),
+                admin_name,
+                client_name,
+                tg_name,
+                format_datetime_export(created_at),
+                resolved_date,
+                resolved_time,
+            ]
+
+            for col_num, value in enumerate(export_row, 1):
                 cell_value = "" if value is None else str(value)
                 cell = ws.cell(row=row_idx, column=col_num, value=cell_value)
                 cell.border = thin_border
                 cell.alignment = left_align
-        
+
         output = io.BytesIO()
         wb.save(output)
         output.seek(0)
         return output.getvalue()
-
-async def export_stats_to_csv() -> bytes:
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("""
-            SELECT id, display_id, user_id, category, sub_category, brand, 
-                   defect_desc, purchase_date, client_wish, status, admin_name, 
-                   client_name, tg_name, created_at 
-            FROM claims 
-            ORDER BY created_at DESC
-        """)
-        rows = await cursor.fetchall()
-        
-        output = io.StringIO()
-        headers = [
-            'ID', 'Номер заявки', 'User ID', 'Категория', 'Подкатегория', 
-            'Бренд', 'Дефект', 'Дата покупки', 'Пожелание клиента', 
-            'Статус', 'Админ', 'Клиент', 'Имя в Telegram', 'Дата создания'
-        ]
-        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
-        writer.writerow(headers)
-        for row in rows:
-            writer.writerow(row)
-        return output.getvalue().encode('utf-8-sig')
 
 async def get_claims_count() -> int:
     async with aiosqlite.connect(DB_NAME) as db:
