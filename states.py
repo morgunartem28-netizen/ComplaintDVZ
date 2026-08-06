@@ -38,17 +38,24 @@ class AdminActionFSM(StatesGroup):
 class SuperAdminFSM(StatesGroup):
     waiting_for_id = State()
     waiting_for_id_delete = State()
+    waiting_for_clear_confirm = State()
 
 class TradeinState(StatesGroup):
     model = State()
     sim = State()
     memory = State()
     condition = State()
+    screen_condition = State()
+    body_condition = State()
     battery = State()
+    repair_choice = State()
     repair = State()
     equipment = State()
     activation_date = State()
     target_model = State()
+    payment_method = State()
+    competitor_offer = State()
+    receiver_name = State()
     photos = State()
 
 class TradeinAdminFSM(StatesGroup):
@@ -74,6 +81,15 @@ class ExchangeFSM(StatesGroup):
 # ==========================================
 # СОСТОЯНИЯ ДЛЯ КОРРЕКТИРОВКИ ТЕХНИКИ
 # ==========================================
+
+# ==========================================
+# СОСТОЯНИЯ ДЛЯ ЧАТА ЗАЯВКИ (ОБСУЖДЕНИЕ)
+# ==========================================
+
+class ChatFSM(StatesGroup):
+    waiting_message = State()
+    waiting_photo = State()
+
 
 class TechAdjustmentFSM(StatesGroup):
     # Выбор: подтянуть из заявки или создать новую

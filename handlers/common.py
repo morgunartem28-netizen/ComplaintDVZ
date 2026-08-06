@@ -1,12 +1,20 @@
 from aiogram import Router, F
 from aiogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
 from aiogram.fsm.context import FSMContext
-from database import get_user_role, set_user_role, find_claim_by_display_id_or_imei
-from keyboards import get_main_menu, get_tech_type_buttons, get_adjustment_type_buttons
+from aiogram.utils.formatting import Text, Italic
+from database import (
+    get_user_role, set_user_role, find_claim_by_display_id_or_imei,
+    get_stats_overview, get_pending_claims, get_all_admins_list,
+)
+from keyboards import (
+    get_main_menu, get_tech_type_buttons, get_adjustment_type_buttons, get_chat_button,
+    get_admin_panel_quick_actions,
+)
 from states import TechState, AccState, TradeinState
+from filters import IsSuperAdmin
 import re
 import logging
-from utils.markdown import escape_markdown
+from utils.telegram_helpers import build_user_mention
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -50,6 +58,47 @@ async def cmd_cancel(message: Message, state: FSMContext):
         "Операция отменена.\n\nВыберите категорию:",
         reply_markup=get_main_menu()
     )
+
+# Команда панели супер-администратора. Зарегистрирована здесь (в common_router,
+# который в main.py подключается ПЕРВЫМ), а не в handlers/admin.py — иначе она
+# перехватывалась бы более ранними роутерами (acc/tech/tradein/complaint), чьи
+# хендлеры свободного текста в незавершённых сценариях заявки (see TechState,
+# AccState и т.п.) фильтруются только по состоянию FSM и не различают команды
+# от обычного текста. См. подробный комментарий в handlers/admin.py.
+@router.message(F.text == "/admin_panel", IsSuperAdmin())
+async def admin_panel(message: Message):
+    overview = await get_stats_overview()
+    pending_overdue = await get_pending_claims()
+    admins = await get_all_admins_list()
+    admin_counts = {
+        "super_admin": len(admins.get("super_admin", [])),
+        "admin_tech": len(admins.get("admin_tech", [])),
+        "admin_acc": len(admins.get("admin_acc", [])),
+        "admin_tradein": len(admins.get("admin_tradein", [])),
+        "admin_complaint": len(admins.get("admin_complaint", []))
+    }
+
+    dashboard_text = (
+        "Панель супер-админа\n\n"
+        "Краткая статистика:\n"
+        f"- Всего заявок: {overview.get('total', 0)}\n"
+        f"- Ожидают решения: {overview.get('pending', 0)}\n"
+        f"- Решено: {overview.get('resolved', 0)}\n"
+        f"- Просроченные (>2 ч): {len(pending_overdue)}\n\n"
+        "Активные администраторы по ролям:\n"
+        f"- Супер-админы: {admin_counts['super_admin']}\n"
+        f"- Админы (техника): {admin_counts['admin_tech']}\n"
+        f"- Админы (аксессуары): {admin_counts['admin_acc']}\n"
+        f"- Админы (Trade-in): {admin_counts['admin_tradein']}\n"
+        f"- Админы (Complaint): {admin_counts['admin_complaint']}\n\n"
+        "Быстрые действия:"
+    )
+    await message.answer(dashboard_text, reply_markup=get_admin_panel_quick_actions())
+
+
+@router.message(F.text == "/admin_panel")
+async def admin_panel_denied(message: Message):
+    await message.answer("⛔ Доступ запрещен. Команда только для супер-администраторов.")
 
 @router.message(F.text == "Техника")
 async def tech_start(message: Message, state: FSMContext):
@@ -125,6 +174,8 @@ async def inline_search_claim(inline_query: InlineQuery):
     c_admin_comment = claim.get('admin_comment')
     c_client_name = claim.get('client_name')
     c_created_at = claim.get('created_at')
+    c_user_id = claim.get('user_id')
+    c_tg_name = claim.get('tg_name')
 
     access_denied = False
     if role == 'admin_tech' and c_category != 'tech':
@@ -179,35 +230,39 @@ async def inline_search_claim(inline_query: InlineQuery):
             return default
         return str(value)
 
-    defect_text = escape_markdown(safe_text(c_defect, "Не указано"))
-    date_text = escape_markdown(safe_text(c_purchase_date, "Не указана"))
-    wish_text = escape_markdown(safe_text(c_client_wish, "Не указано"))
-    admin_text = escape_markdown(safe_text(c_admin_name, "Не назначен"))
-    comment_text = escape_markdown(safe_text(c_admin_comment, "—"))
-    client_text = escape_markdown(safe_text(c_client_name, "Не указано"))
+    defect_text = safe_text(c_defect, "Не указано")
+    date_text = safe_text(c_purchase_date, "Не указана")
+    wish_text = safe_text(c_client_wish, "Не указано")
+    admin_text = safe_text(c_admin_name, "Не назначен")
+    comment_text = safe_text(c_admin_comment, "—")
+    client_text = safe_text(c_client_name, "Не указано")
+    tt_node = build_user_mention(c_user_id, c_tg_name or c_client_name or str(c_user_id)) if c_user_id else "Не указано"
 
-    result_text = (
-        f"Заявка {search_id}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Категория: {category_ru}\n"
-        f"Сотрудник: {client_text}\n"
-        f"Дефект:\n_{defect_text}_\n"
-        f"Дата покупки: {date_text}\n"
-        f"Пожелание: {wish_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Решение: {status_emoji} {status_ru}\n"
-        f"Ответственный: {admin_text}\n"
-        f"Комментарий: {comment_text}\n"
+    content = Text(
+        f"Заявка {search_id}\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        f"Категория: {category_ru}\n",
+        "ТТ: ", tt_node, "\n",
+        f"Сотрудник: {client_text}\n",
+        "Дефект:\n", Italic(defect_text), "\n",
+        f"Дата покупки: {date_text}\n",
+        f"Пожелание: {wish_text}\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        f"Решение: {status_emoji} {status_ru}\n",
+        f"Ответственный: {admin_text}\n",
+        f"Комментарий: {comment_text}\n",
     )
+    content_kwargs = content.as_kwargs()
 
     result = InlineQueryResultArticle(
         id=str(c_id),
         title=f"{search_id} — {category_ru}",
         description=f"{client_text} | {status_ru}",
         input_message_content=InputTextMessageContent(
-            message_text=result_text,
-            parse_mode="Markdown"
-        )
+            message_text=content_kwargs["text"],
+            entities=content_kwargs["entities"],
+        ),
+        reply_markup=get_chat_button(c_id)
     )
 
     logger.info("Inline claim found: %s (id=%s)", search_id, c_id)

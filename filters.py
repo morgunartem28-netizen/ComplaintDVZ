@@ -1,4 +1,4 @@
-from aiogram import BaseFilter
+from aiogram.filters import BaseFilter
 from aiogram.types import Message, CallbackQuery
 from database import get_user_role
 

@@ -25,7 +25,7 @@ def get_acc_types():
 
 def get_tech_type_buttons():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛠 Б/У", callback_data="tech_ptv")],
+        [InlineKeyboardButton(text="🛠 ПТВ", callback_data="tech_ptv")],
         [InlineKeyboardButton(text="🆕 Новое устройство", callback_data="tech_new")]
     ])
     return kb
@@ -57,34 +57,34 @@ def get_tradein_admin_decision(claim_id: int):
     ])
     return kb
 
-def get_admin_panel_menu():
+def get_super_admin_menu():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="panel_refresh")],
-        [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="sa_stats_menu"),
-            InlineKeyboardButton(text="📥 Excel", callback_data="stats_export_menu_panel"),
-        ],
-        [
-            InlineKeyboardButton(text="👮 Назначить", callback_data="sa_add_admin_menu"),
-            InlineKeyboardButton(text="🗑 Снять права", callback_data="sa_del_admin_menu"),
-        ],
+        [InlineKeyboardButton(text="👮 Назначить админа", callback_data="sa_add_admin_menu")],
+        [InlineKeyboardButton(text="🗑 Удалить админа", callback_data="sa_del_admin_menu")],
         [InlineKeyboardButton(text="📋 Список админов", callback_data="sa_list_admins")],
-        [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="sa_clear_db")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="sa_stats_menu")],
+        [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="sa_clear_db")]
     ])
     return kb
 
 
-def get_super_admin_menu():
-    return get_admin_panel_menu()
+def get_admin_panel_quick_actions():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Назначить админа", callback_data="sa_add_admin_menu")],
+        [InlineKeyboardButton(text="Снять права", callback_data="sa_del_admin_menu")],
+        [InlineKeyboardButton(text="Список админов", callback_data="sa_list_admins")],
+        [InlineKeyboardButton(text="Статистика", callback_data="sa_stats_menu")],
+        [InlineKeyboardButton(text="Расширенное меню", callback_data="sa_open_full_menu")]
+    ])
+    return kb
 
 def get_role_selection_buttons():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛠 Техника", callback_data="role_tech")],
-        [InlineKeyboardButton(text="🎧 Аксессуары", callback_data="role_acc")],
-        [InlineKeyboardButton(text="🔄 Trade-in", callback_data="role_tradein")],
-        [InlineKeyboardButton(text="📦 Остатки", callback_data="role_complaint")],
-        [InlineKeyboardButton(text="👑 Супер-админ", callback_data="role_super")],
-        [InlineKeyboardButton(text="⬅️ На главную", callback_data="panel_home")],
+        [InlineKeyboardButton(text="🛠 Техника (admin_tech)", callback_data="role_tech")],
+        [InlineKeyboardButton(text="🎧 Аксессуары (admin_acc)", callback_data="role_acc")],
+        [InlineKeyboardButton(text="🔄 Trade-in (admin_tradein)", callback_data="role_tradein")],
+        [InlineKeyboardButton(text="📦 Остатки (admin_complaint)", callback_data="role_complaint")],
+        [InlineKeyboardButton(text="👑 Супер-админ (super_admin)", callback_data="role_super")]
     ])
     return kb
 
@@ -93,13 +93,13 @@ def get_stats_menu():
         [InlineKeyboardButton(text="📈 Общая статистика", callback_data="stats_overview")],
         [InlineKeyboardButton(text="🏢 Подробно по ТТ", callback_data="stats_points")],
         [InlineKeyboardButton(text="⏳ Просроченные заявки", callback_data="stats_pending")],
-        [InlineKeyboardButton(text="📥 Экспорт Excel", callback_data="stats_export_menu")],
-        [InlineKeyboardButton(text="⬅️ На главную", callback_data="panel_home")]
+        [InlineKeyboardButton(text="📅 Экспорт за период", callback_data="stats_export_period_menu")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_admin")]
     ])
     return kb
 
 
-def get_export_period_buttons(back_callback: str = "panel_home"):
+def get_export_period_buttons(back_callback: str = "sa_stats_menu"):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="За 7 дней", callback_data="stats_export_days_7")],
         [InlineKeyboardButton(text="За 30 дней", callback_data="stats_export_days_30")],
@@ -129,7 +129,7 @@ def get_warranty_status_buttons():
 
 def get_back_to_admin():
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ На главную", callback_data="panel_home")]
+        [InlineKeyboardButton(text="⬅️ В меню админа", callback_data="back_to_admin")]
     ])
     return kb
 
@@ -241,3 +241,100 @@ def get_tradein_condition_buttons():
         [InlineKeyboardButton(text="Разбитый", callback_data="tradein_cond_broken")]
     ])
     return kb
+
+def get_tradein_screen_condition_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Без дефектов", callback_data="tradein_screen_none")],
+        [InlineKeyboardButton(text="Мелкие царапины", callback_data="tradein_screen_minor")],
+        [InlineKeyboardButton(text="Глубокие царапины", callback_data="tradein_screen_deep")],
+        [InlineKeyboardButton(text="Сколы", callback_data="tradein_screen_chips")]
+    ])
+    return kb
+
+def get_tradein_body_condition_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Без дефектов", callback_data="tradein_body_none")],
+        [InlineKeyboardButton(text="Мелкие царапины", callback_data="tradein_body_minor")],
+        [InlineKeyboardButton(text="Глубокие царапины", callback_data="tradein_body_deep")],
+        [InlineKeyboardButton(text="Сколы", callback_data="tradein_body_chips")]
+    ])
+    return kb
+
+def get_tradein_repair_choice_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Без ремонтов", callback_data="tradein_repair_none")],
+        [InlineKeyboardButton(text="Указать ремонты", callback_data="tradein_repair_specify")]
+    ])
+    return kb
+
+def get_tradein_payment_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Наличные", callback_data="tradein_pay_cash")],
+        [InlineKeyboardButton(text="Банковская карта", callback_data="tradein_pay_card")],
+        [InlineKeyboardButton(text="Кредит/Рассрочка", callback_data="tradein_pay_credit")]
+    ])
+    return kb
+
+def get_tradein_competitor_offer_buttons():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Не оценивали", callback_data="tradein_competitor_none")]
+    ])
+    return kb
+
+# ==========================================
+# КЛАВИАТУРЫ ДЛЯ ЧАТА ЗАЯВКИ (ОБСУЖДЕНИЕ)
+# ==========================================
+
+def get_chat_button(claim_id: int) -> InlineKeyboardMarkup:
+    """Одна кнопка входа в чат заявки. Добавляется во все карточки заявки,
+    которые видят участники чата (автор, ответственный админ, супер-админы)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Чат заявки", callback_data=f"chat_open_{claim_id}")]
+    ])
+
+
+def append_chat_button_row(kb: InlineKeyboardMarkup, claim_id: int) -> InlineKeyboardMarkup:
+    """Добавляет строку с кнопкой чата в уже существующую inline-клавиатуру
+    (например, к клавиатуре с кнопками решения администратора), не создавая
+    для каждой карточки заявки отдельного сообщения."""
+    kb.inline_keyboard.append(
+        [InlineKeyboardButton(text="💬 Чат заявки", callback_data=f"chat_open_{claim_id}")]
+    )
+    return kb
+
+
+def get_chat_history_keyboard(
+    claim_id: int,
+    is_locked: bool,
+    can_reopen: bool,
+    can_reply_last: bool,
+    can_close: bool = False,
+) -> InlineKeyboardMarkup:
+    """Клавиатура под историей переписки заявки.
+
+    is_locked — чат закрыт (заявка решена, либо закрыт вручную) и доступен только для чтения.
+    can_reopen — может ли текущий пользователь повторно открыть чат (только супер-админ),
+        актуально только когда is_locked=True.
+    can_reply_last — есть ли в истории хотя бы одно сообщение, на которое можно ответить.
+    can_close — может ли текущий пользователь закрыть обсуждение вручную (только супер-админ),
+        актуально только когда is_locked=False — симметрично can_reopen.
+    """
+    rows = []
+    if not is_locked:
+        rows.append([InlineKeyboardButton(text="✍ Написать сообщение", callback_data=f"chat_write_{claim_id}")])
+        rows.append([InlineKeyboardButton(text="📷 Фото", callback_data=f"chat_photo_{claim_id}")])
+        if can_reply_last:
+            rows.append([InlineKeyboardButton(text="↩️ Ответить на последнее", callback_data=f"chat_reply_last_{claim_id}")])
+        if can_close:
+            rows.append([InlineKeyboardButton(text="⛔ Закрыть обсуждение", callback_data=f"chat_close_{claim_id}")])
+    elif can_reopen:
+        rows.append([InlineKeyboardButton(text="🔓 Возобновить обсуждение", callback_data=f"chat_reopen_{claim_id}")])
+    rows.append([InlineKeyboardButton(text="⬅ Назад", callback_data=f"chat_back_{claim_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_chat_cancel_keyboard(claim_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура на время ожидания ввода сообщения/фото в чат — позволяет отменить ввод."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data=f"chat_cancel_{claim_id}")]
+    ])

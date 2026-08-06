@@ -1,5 +1,7 @@
 import aiosqlite
+import csv
 import io
+import logging
 from pathlib import Path
 from datetime import datetime
 from config import DB_NAME, ADMIN_IDS
@@ -11,7 +13,20 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
+logger = logging.getLogger(__name__)
+
 ENV_SUPER_ADMIN_IDS = ADMIN_IDS if ADMIN_IDS else []
+
+# Таймаут ожидания снятия блокировки БД другим соединением (в секундах).
+# Эквивалентен PRAGMA busy_timeout и уменьшает вероятность "database is locked"
+# при конкурентной записи нескольких обработчиков одновременно.
+DB_BUSY_TIMEOUT_SECONDS = 5
+
+
+def get_connection() -> aiosqlite.Connection:
+    """Единая точка открытия соединения с БД с настроенным busy_timeout."""
+    return aiosqlite.connect(DB_NAME, timeout=DB_BUSY_TIMEOUT_SECONDS)
+
 
 def _quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -41,18 +56,20 @@ async def _sync_archive_schema(db: aiosqlite.Connection):
         await db.execute(" ".join(parts))
 
 async def archive_old_claims(days: int = 365):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await _sync_archive_schema(db)
         await db.execute(f"""
             INSERT INTO claims_archive (
                 id, display_id, user_id, category, sub_category, brand,
                 defect_desc, purchase_date, client_wish, photo_id, status,
-                admin_comment, admin_name, client_name, tg_name, created_at
+                admin_comment, admin_name, client_name, tg_name, created_at,
+                payment_method, competitor_offer, chat_locked
             )
             SELECT
                 id, display_id, user_id, category, sub_category, brand,
                 defect_desc, purchase_date, client_wish, photo_id, status,
-                admin_comment, admin_name, client_name, tg_name, created_at
+                admin_comment, admin_name, client_name, tg_name, created_at,
+                payment_method, competitor_offer, chat_locked
             FROM claims
             WHERE date(created_at) < date('now', '-{days} days')
         """)
@@ -66,7 +83,12 @@ async def archive_old_claims(days: int = 365):
         return archived_count
 
 async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
+        # WAL позволяет читателям не блокироваться на время записи и наоборот,
+        # что вместе с busy_timeout (см. get_connection) заметно снижает риск
+        # "database is locked" при конкурентных обращениях к SQLite.
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA busy_timeout=5000")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -90,6 +112,8 @@ async def init_db():
                 admin_name TEXT,
                 client_name TEXT DEFAULT 'Не указано',
                 tg_name TEXT DEFAULT '',
+                payment_method TEXT,
+                competitor_offer TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -160,6 +184,7 @@ async def init_db():
                     (admin_id, 'super_admin')
                 )
         await db.commit()
+    logger.info("Database schema initialized (WAL mode, busy_timeout=%ss)", DB_BUSY_TIMEOUT_SECONDS)
     await apply_migrations()
 
 async def apply_migrations():
@@ -171,7 +196,8 @@ async def apply_migrations():
     if not migration_files:
         return
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    applied_count = 0
+    async with get_connection() as db:
         for migration_file in migration_files:
             version = migration_file.name
             cursor = await db.execute(
@@ -191,28 +217,36 @@ async def apply_migrations():
                     # если колонка уже создана в новой схеме.
                     if "duplicate column name" not in str(exc).lower():
                         raise
+                    logger.info("Migration %s already applied to schema (columns exist), marking as applied", version)
             await db.execute(
                 "INSERT INTO schema_migrations (version) VALUES (?)",
                 (version,)
             )
+            applied_count += 1
+            logger.info("Applied migration: %s", version)
         await db.commit()
+    if applied_count == 0:
+        logger.info("No new migrations to apply, schema is up to date")
+    else:
+        logger.info("Applied %s new migration(s)", applied_count)
 
 async def get_user_role(user_id: int) -> str:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
         res = await cursor.fetchone()
         return res[0] if res else 'user'
 
 async def set_user_role(user_id: int, role: str):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await db.execute(
             "INSERT OR REPLACE INTO users (user_id, role) VALUES (?, ?)",
             (user_id, role)
         )
         await db.commit()
+    logger.info("User role updated: user_id=%s new_role=%s", user_id, role)
 
 async def log_action(admin_id: int, action: str, target_id: int = None):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await db.execute(
             "INSERT INTO logs (admin_id, action, target_id) VALUES (?, ?, ?)",
             (admin_id, action, target_id)
@@ -220,7 +254,7 @@ async def log_action(admin_id: int, action: str, target_id: int = None):
         await db.commit()
 
 async def log_update(user_id: int, update_type: str):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await db.execute(
             "INSERT INTO updates_log (user_id, update_type) VALUES (?, ?)",
             (user_id, update_type)
@@ -228,7 +262,7 @@ async def log_update(user_id: int, update_type: str):
         await db.commit()
 
 async def get_next_display_id(category: str) -> str:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await db.execute("BEGIN IMMEDIATE")
         cursor = await db.execute(
             "SELECT last_number FROM claim_counters WHERE category = ?",
@@ -257,23 +291,42 @@ async def get_next_display_id(category: str) -> str:
 async def create_claim(data: dict, user_id: int) -> tuple:
     category = data['category']
     display_id = await get_next_display_id(category)
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor = await db.execute("""
             INSERT INTO claims (
                 display_id, user_id, category, sub_category, brand, 
-                defect_desc, purchase_date, client_wish, photo_id, client_name, tg_name
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                defect_desc, purchase_date, client_wish, photo_id, client_name, tg_name,
+                payment_method, competitor_offer
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             display_id, user_id, data['category'], data.get('sub_category'), 
             data.get('brand'), data.get('defect'), data.get('purchase_date'), 
             data.get('client_wish'), data['photo'], data.get('client_name', 'Не указано'),
-            data.get('tg_name', '')
+            data.get('tg_name', ''), data.get('payment_method'), data.get('competitor_offer')
         ))
+        claim_id = cursor.lastrowid
+        # Системная запись в чат заявки (журнал событий, см. раздел "ЧАТ ЗАЯВКИ" ниже).
+        # Вставляется в той же транзакции, что и сама заявка — не требует отдельного
+        # соединения и гарантированно появляется одновременно с созданием заявки.
+        try:
+            await db.execute(
+                """INSERT INTO chat_messages (claim_id, sender_id, sender_role, message_type, text)
+                   VALUES (?, NULL, 'system', 'system', ?)""",
+                (claim_id, "Заявка создана")
+            )
+        except aiosqlite.OperationalError as exc:
+            # Таблица чата появляется миграцией 005 и может отсутствовать только
+            # в переходный момент до применения миграций — не должно ломать создание заявки.
+            logger.warning("Chat system message on claim create skipped: %s", exc)
         await db.commit()
-        return cursor.lastrowid, display_id
+        logger.info(
+            "Claim created: display_id=%s category=%s sub_category=%s user_id=%s",
+            display_id, category, data.get('sub_category'), user_id
+        )
+        return claim_id, display_id
 
 async def get_claim(claim_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM claims WHERE id = ?", (claim_id,))
         row = await cursor.fetchone()
@@ -282,7 +335,7 @@ async def get_claim(claim_id: int):
         return dict(row)
 
 async def get_claim_by_display_id(display_id: str):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT * FROM claims WHERE display_id = ?", (display_id,))
         row = await cursor.fetchone()
@@ -295,7 +348,7 @@ async def find_claim_by_display_id_or_imei(query: str):
     if not query_norm:
         return None
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
@@ -315,7 +368,7 @@ async def find_claim_by_display_id_or_imei(query: str):
         return dict(row)
 
 async def get_claim_by_display_id_for_user(display_id: str, user_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM claims WHERE display_id = ? AND user_id = ?",
@@ -327,7 +380,7 @@ async def get_claim_by_display_id_for_user(display_id: str, user_id: int):
         return dict(row)
 
 async def update_claim_status(claim_id: int, status: str, comment: str = None, admin_name: str = None):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await db.execute(
             "UPDATE claims SET status = ?, admin_comment = ?, admin_name = ? WHERE id = ?",
             (status, comment, admin_name, claim_id)
@@ -335,7 +388,7 @@ async def update_claim_status(claim_id: int, status: str, comment: str = None, a
         await db.commit()
 
 async def try_update_claim_status(claim_id: int, status: str, comment: str = None, admin_name: str = None) -> tuple:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
         
@@ -374,7 +427,7 @@ async def try_update_claim_status(claim_id: int, status: str, comment: str = Non
             raise
 
 async def add_claim_history(claim_id: int, display_id: str, old_status: str, new_status: str, admin_id: int, admin_name: str, comment: str = None):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         await db.execute("""
             INSERT INTO claim_history (claim_id, display_id, old_status, new_status, admin_id, admin_name, comment)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -382,7 +435,7 @@ async def add_claim_history(claim_id: int, display_id: str, old_status: str, new
         await db.commit()
 
 async def get_claim_history(claim_id: int):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor = await db.execute("""
             SELECT old_status, new_status, admin_name, comment, changed_at 
             FROM claim_history 
@@ -392,8 +445,174 @@ async def get_claim_history(claim_id: int):
         return await cursor.fetchall()
 
 
+# ==========================================
+# ЧАТ ЗАЯВКИ (ОБСУЖДЕНИЕ)
+# ==========================================
+# Участники чата заявки НЕ хранятся отдельной таблицей — они вычисляются
+# каждый раз из уже существующих данных (claims.user_id, claim_history.admin_id,
+# users.role), чтобы не дублировать источник истины и не терять актуальность
+# при смене ролей администраторов. Единственное состояние, которое реально
+# хранится — сами сообщения (chat_messages) и признак блокировки (claims.chat_locked).
+
+CLAIM_CATEGORY_ADMIN_ROLE = {
+    'tech': 'admin_tech',
+    'acc': 'admin_acc',
+    'tradein': 'admin_tradein',
+    'complaint': 'admin_complaint',
+}
+
+
+async def get_claim_responsible_admin_id(claim_id: int):
+    """ID администратора, принявшего последнее решение по заявке (по claim_history).
+
+    Пока по заявке нет ни одного решения, единого "ответственного" не существует —
+    в этом случае участниками чата со стороны администрации считаются ВСЕ
+    администраторы соответствующей роли (см. get_claim_chat_participants).
+    """
+    async with get_connection() as db:
+        cursor = await db.execute(
+            """
+            SELECT admin_id FROM claim_history
+            WHERE claim_id = ? AND admin_id IS NOT NULL
+            ORDER BY changed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (claim_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+
+async def get_claim_chat_participants(claim: dict) -> dict:
+    """Вычисляет участников чата заявки одним компактным набором запросов
+    (без N+1: по одному запросу на список админов роли/супер-админов).
+
+    Возвращает {'author_id': int|None, 'admin_ids': set[int], 'super_admin_ids': set[int]}.
+    """
+    claim_id = claim['id']
+    category = claim.get('category')
+    role_prefix = CLAIM_CATEGORY_ADMIN_ROLE.get(category)
+
+    responsible_admin_id = await get_claim_responsible_admin_id(claim_id)
+    admin_ids = set()
+    if responsible_admin_id:
+        admin_ids.add(responsible_admin_id)
+    elif role_prefix:
+        # Заявка ещё не решена — доступ имеют все админы соответствующей роли
+        # (именно они и так получают уведомление о новой заявке).
+        admin_ids.update(await get_admins_by_role(role_prefix))
+
+    super_admin_ids = set(await get_admins_by_role('super_admin'))
+
+    return {
+        'author_id': claim.get('user_id'),
+        'admin_ids': admin_ids,
+        'super_admin_ids': super_admin_ids,
+    }
+
+
+async def get_claim_chat_role(claim: dict, user_id: int):
+    """Роль пользователя в чате конкретной заявки: 'tt' | 'admin' | 'super_admin' | None.
+
+    None означает, что пользователь НЕ является участником чата этой заявки —
+    вызывающий код обязан в этом случае вызвать deny_access и не показывать историю.
+    Проверка идёт по реальным данным БД, а не по тому, что пользователь передал
+    в callback_data (claim_id в колбэке — это только "куда", а не "можно ли").
+    """
+    if claim.get('user_id') == user_id:
+        return 'tt'
+    participants = await get_claim_chat_participants(claim)
+    if user_id in participants['super_admin_ids']:
+        return 'super_admin'
+    if user_id in participants['admin_ids']:
+        return 'admin'
+    return None
+
+
+async def get_claim_chat_recipient_ids(claim: dict, exclude_id=None) -> set:
+    """Полный набор user_id участников чата (для рассылки), одним вычислением."""
+    participants = await get_claim_chat_participants(claim)
+    recipients = set(participants['admin_ids']) | set(participants['super_admin_ids'])
+    if participants['author_id']:
+        recipients.add(participants['author_id'])
+    recipients.discard(None)
+    recipients.discard(exclude_id)
+    return recipients
+
+
+async def add_chat_message(
+    claim_id: int,
+    sender_id,
+    sender_role: str,
+    message_type: str,
+    text: str = None,
+    file_id: str = None,
+    reply_to_message_id: int = None,
+) -> int:
+    async with get_connection() as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO chat_messages (claim_id, sender_id, sender_role, message_type, text, file_id, reply_to_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (claim_id, sender_id, sender_role, message_type, text, file_id, reply_to_message_id)
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def add_chat_system_message(claim_id: int, text: str) -> int:
+    """Автоматическая системная запись о событии жизненного цикла заявки
+    (создание, финальное решение) — попадает в общую историю чата заявки."""
+    return await add_chat_message(claim_id, sender_id=None, sender_role='system', message_type='system', text=text)
+
+
+async def get_chat_messages(claim_id: int, limit: int = 200) -> list:
+    """История сообщений чата заявки в хронологическом порядке (старые -> новые).
+
+    Один запрос с индексом по (claim_id, created_at) — без N+1. limit защищает
+    от неограниченного роста одного текстового сообщения истории у очень старых
+    заявок с очень длинной перепиской (см. render_chat_history — дополнительно
+    обрезает по количеству символов Telegram).
+    """
+    async with get_connection() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM chat_messages
+            WHERE claim_id = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (claim_id, limit)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def get_chat_message(message_id: int):
+    async with get_connection() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT * FROM chat_messages WHERE id = ?", (message_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def set_claim_chat_locked(claim_id: int, locked: bool):
+    async with get_connection() as db:
+        await db.execute(
+            "UPDATE claims SET chat_locked = ? WHERE id = ?",
+            (1 if locked else 0, claim_id)
+        )
+        await db.commit()
+
+
+def is_claim_chat_locked(claim: dict) -> bool:
+    return bool(claim.get('chat_locked'))
+
+
 async def get_admins_by_role(role_prefix: str):
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         if role_prefix == 'super_admin':
             cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
             rows = await cursor.fetchall()
@@ -435,7 +654,7 @@ async def get_admins_by_role(role_prefix: str):
 
 
 async def get_all_admins_list() -> dict:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         result = {
             'super_admin': [],
             'admin_tech': [],
@@ -477,7 +696,7 @@ async def get_all_admins_list() -> dict:
         return result
 
 async def get_stats_overview():
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor_total = await db.execute("SELECT COUNT(*) FROM claims")
         total = (await cursor_total.fetchone())[0]
         cursor_pending = await db.execute("SELECT COUNT(*) FROM claims WHERE status = 'pending'")
@@ -489,55 +708,50 @@ async def get_stats_overview():
         return {'total': total, 'pending': pending, 'resolved': resolved}
 
 async def get_stats_by_points():
-    async with aiosqlite.connect(DB_NAME) as db:
-        cursor = await db.execute("SELECT DISTINCT user_id FROM claims")
-        user_ids = [row[0] for row in await cursor.fetchall()]
-        stats_list = []
-        for uid in user_ids:
-            cursor_ptv = await db.execute(
-                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND sub_category = 'ПТВ'",
-                (uid,)
-            )
-            ptv = (await cursor_ptv.fetchone())[0]
-            cursor_new = await db.execute(
-                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND sub_category = 'Новое устройство'",
-                (uid,)
-            )
-            new_dev = (await cursor_new.fetchone())[0]
-            cursor_acc = await db.execute(
-                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND category = 'acc'",
-                (uid,)
-            )
-            acc = (await cursor_acc.fetchone())[0]
-            cursor_tradein = await db.execute(
-                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND category = 'tradein'",
-                (uid,)
-            )
-            tradein = (await cursor_tradein.fetchone())[0]
-            cursor_complaint = await db.execute(
-                "SELECT COUNT(*) FROM claims WHERE user_id = ? AND category = 'complaint'",
-                (uid,)
-            )
-            complaint = (await cursor_complaint.fetchone())[0]
-            total = ptv + new_dev + acc + tradein + complaint
-            if total > 0:
-                stats_list.append({
-                    'user_id': uid,
-                    'name': f"ТТ #{uid}",
-                    'ptv': ptv,
-                    'new': new_dev,
-                    'acc': acc,
-                    'tradein': tradein,
-                    'complaint': complaint,
-                    'total': total
-                })
-        stats_list.sort(key=lambda x: x['total'], reverse=True)
+    # Единый агрегирующий запрос вместо 1 + 5*N отдельных COUNT(*) на точку продаж
+    # (устраняет N+1 проблему при росте числа торговых точек и заявок).
+    async with get_connection() as db:
+        cursor = await db.execute("""
+            SELECT
+                user_id,
+                SUM(CASE WHEN sub_category = 'ПТВ' THEN 1 ELSE 0 END) AS ptv,
+                SUM(CASE WHEN sub_category = 'Новое устройство' THEN 1 ELSE 0 END) AS new_dev,
+                SUM(CASE WHEN category = 'acc' THEN 1 ELSE 0 END) AS acc,
+                SUM(CASE WHEN category = 'tradein' THEN 1 ELSE 0 END) AS tradein,
+                SUM(CASE WHEN category = 'complaint' THEN 1 ELSE 0 END) AS complaint,
+                COUNT(*) AS total
+            FROM claims
+            GROUP BY user_id
+            HAVING total > 0
+            ORDER BY total DESC
+        """)
+        rows = await cursor.fetchall()
+        stats_list = [
+            {
+                'user_id': row[0],
+                'name': f"ТТ #{row[0]}",
+                'ptv': row[1],
+                'new': row[2],
+                'acc': row[3],
+                'tradein': row[4],
+                'complaint': row[5],
+                'total': row[6],
+            }
+            for row in rows
+        ]
         return stats_list
 
 async def get_pending_claims():
-    async with aiosqlite.connect(DB_NAME) as db:
+    """Просроченные заявки (>2ч без решения).
+
+    Возвращает также tg_name/client_name вместе с user_id одним запросом
+    (без отдельного N+1 обращения к Telegram через bot.get_chat для каждой
+    строки) — этого достаточно, чтобы вызывающий код построил кликабельную
+    ссылку на автора заявки (см. handlers/super_admin.py: stats_pending).
+    """
+    async with get_connection() as db:
         cursor = await db.execute("""
-            SELECT id, display_id, user_id, category, sub_category, created_at 
+            SELECT id, display_id, user_id, category, sub_category, created_at, tg_name, client_name
             FROM claims 
             WHERE status = 'pending' 
             AND (julianday('now') - julianday(created_at)) * 24 > 2 
@@ -545,7 +759,22 @@ async def get_pending_claims():
         """)
         return await cursor.fetchall()
 
-async def export_stats_to_excel(days: int | None = None) -> bytes:
+EXPORT_HEADERS = [
+    "ID", "Номер заявки", "User ID", "Категория", "Подкатегория",
+    "Название товара", "Дефект", "IMEI", "Дата покупки", "Пожелание клиента",
+    "Статус", "Ответственный", "Клиент", "Имя в Telegram",
+    "Способ оплаты", "Предложение конкурента",
+    "Дата создания", "Дата решения", "Время решения",
+]
+
+
+async def _fetch_export_rows(days: int | None = None) -> list:
+    """Готовые к выгрузке (Excel/CSV) строки отчёта — единая точка формирования,
+    чтобы оба формата экспорта не расходились в наборе и порядке колонок.
+
+    days=None — выгрузка за всё время, иначе — только заявки не старше N дней
+    (используется период-фильтром на панели супер-админа).
+    """
     from utils.export_format import (
         extract_imei,
         extract_product_name,
@@ -556,14 +785,12 @@ async def export_stats_to_excel(days: int | None = None) -> bytes:
         split_datetime_export,
     )
 
-    if not OPENPYXL_AVAILABLE:
-        return b"Error: openpyxl library not installed. Please run 'pip install openpyxl'"
-
     base_query = """
         SELECT
             c.id, c.display_id, c.user_id, c.category, c.sub_category, c.brand,
             c.defect_desc, c.purchase_date, c.client_wish, c.status, c.admin_name,
-            c.client_name, c.tg_name, c.created_at, rh.resolved_at
+            c.client_name, c.tg_name, c.payment_method, c.competitor_offer,
+            c.created_at, rh.resolved_at
         FROM claims c
         LEFT JOIN (
             SELECT claim_id, MAX(changed_at) AS resolved_at
@@ -579,124 +806,134 @@ async def export_stats_to_excel(days: int | None = None) -> bytes:
         query = base_query + " ORDER BY c.created_at DESC"
         params = ()
 
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor = await db.execute(query, params)
         rows = await cursor.fetchall()
 
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Отчет по заявкам"
+    export_rows = []
+    for row in rows:
+        (
+            claim_id,
+            display_id,
+            user_id,
+            category,
+            sub_category,
+            brand,
+            defect_desc,
+            purchase_date,
+            client_wish,
+            status,
+            admin_name,
+            client_name,
+            tg_name,
+            payment_method,
+            competitor_offer,
+            created_at,
+            resolved_at,
+        ) = row
 
-        headers = [
-            "ID",
-            "Номер заявки",
-            "User ID",
-            "Категория",
-            "Подкатегория",
-            "Название товара",
-            "Дефект",
-            "IMEI",
-            "Дата покупки",
-            "Пожелание клиента",
-            "Статус",
-            "Ответственный",
-            "Клиент",
-            "Имя в Telegram",
-            "Дата создания",
-            "Дата решения",
-            "Время решения",
-        ]
+        resolved_date, resolved_time = split_datetime_export(resolved_at)
+        export_rows.append([
+            claim_id,
+            display_id,
+            user_id,
+            format_category_ru(category),
+            sub_category,
+            extract_product_name(brand, category),
+            format_defect_for_export(defect_desc, category, brand),
+            extract_imei(brand, defect_desc, category),
+            purchase_date,
+            client_wish,
+            format_status_ru(status),
+            admin_name,
+            client_name,
+            tg_name,
+            payment_method or "",
+            competitor_offer or "",
+            format_datetime_export(created_at),
+            resolved_date,
+            resolved_time,
+        ])
+    return export_rows
 
-        header_font = Font(bold=True, color="FFFFFF", size=12)
-        header_bg = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-        thin_border = Border(
-            left=Side(style="thin"),
-            right=Side(style="thin"),
-            top=Side(style="thin"),
-            bottom=Side(style="thin"),
-        )
-        center_align = Alignment(horizontal="center", vertical="center")
-        left_align = Alignment(horizontal="left", vertical="center")
 
-        col_widths = [5, 10, 10, 14, 18, 25, 35, 18, 14, 20, 16, 18, 20, 22, 18, 14, 10]
+async def export_stats_to_excel(days: int | None = None) -> bytes:
+    if not OPENPYXL_AVAILABLE:
+        return b"Error: openpyxl library not installed. Please run 'pip install openpyxl'"
 
-        for col_num, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col_num, value=header)
-            cell.font = header_font
-            cell.fill = header_bg
-            cell.alignment = center_align
+    export_rows = await _fetch_export_rows(days)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Отчет по заявкам"
+
+    header_font = Font(bold=True, color="FFFFFF", size=12)
+    header_bg = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+    center_align = Alignment(horizontal="center", vertical="center")
+    left_align = Alignment(horizontal="left", vertical="center")
+
+    col_widths = [5, 10, 10, 14, 18, 25, 35, 18, 14, 20, 16, 18, 20, 22, 16, 20, 18, 14, 10]
+
+    for col_num, header in enumerate(EXPORT_HEADERS, 1):
+        cell = ws.cell(row=1, column=col_num, value=header)
+        cell.font = header_font
+        cell.fill = header_bg
+        cell.alignment = center_align
+        cell.border = thin_border
+        if col_num <= len(col_widths):
+            ws.column_dimensions[chr(64 + col_num)].width = col_widths[col_num - 1]
+
+    for row_idx, export_row in enumerate(export_rows, 2):
+        for col_num, value in enumerate(export_row, 1):
+            cell_value = "" if value is None else str(value)
+            cell = ws.cell(row=row_idx, column=col_num, value=cell_value)
             cell.border = thin_border
-            if col_num <= len(col_widths):
-                ws.column_dimensions[chr(64 + col_num)].width = col_widths[col_num - 1]
+            cell.alignment = left_align
 
-        for row_idx, row in enumerate(rows, 2):
-            (
-                claim_id,
-                display_id,
-                user_id,
-                category,
-                sub_category,
-                brand,
-                defect_desc,
-                purchase_date,
-                client_wish,
-                status,
-                admin_name,
-                client_name,
-                tg_name,
-                created_at,
-                resolved_at,
-            ) = row
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
 
-            resolved_date, resolved_time = split_datetime_export(resolved_at)
-            export_row = [
-                claim_id,
-                display_id,
-                user_id,
-                format_category_ru(category),
-                sub_category,
-                extract_product_name(brand, category),
-                format_defect_for_export(defect_desc, category, brand),
-                extract_imei(brand, defect_desc, category),
-                purchase_date,
-                client_wish,
-                format_status_ru(status),
-                admin_name,
-                client_name,
-                tg_name,
-                format_datetime_export(created_at),
-                resolved_date,
-                resolved_time,
-            ]
+async def export_stats_to_csv(days: int | None = None) -> bytes:
+    export_rows = await _fetch_export_rows(days)
 
-            for col_num, value in enumerate(export_row, 1):
-                cell_value = "" if value is None else str(value)
-                cell = ws.cell(row=row_idx, column=col_num, value=cell_value)
-                cell.border = thin_border
-                cell.alignment = left_align
-
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        return output.getvalue()
+    output = io.StringIO()
+    writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
+    writer.writerow(EXPORT_HEADERS)
+    for row in export_rows:
+        writer.writerow(["" if value is None else value for value in row])
+    return output.getvalue().encode('utf-8-sig')
 
 async def get_claims_count() -> int:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor = await db.execute("SELECT COUNT(*) FROM claims")
         return (await cursor.fetchone())[0]
 
 async def get_archive_count() -> int:
-    async with aiosqlite.connect(DB_NAME) as db:
+    async with get_connection() as db:
         cursor = await db.execute("SELECT COUNT(*) FROM claims_archive")
         return (await cursor.fetchone())[0]
 
 async def clear_all_claims():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("DELETE FROM claims")
-        await db.execute("DELETE FROM claims_archive")
-        await db.execute("DELETE FROM claim_history")
-        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tech'")
-        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'acc'")
-        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tradein'")
-        await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'complaint'")
-        await db.commit()
+    async with get_connection() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            await db.execute("DELETE FROM claims")
+            await db.execute("DELETE FROM claims_archive")
+            await db.execute("DELETE FROM claim_history")
+            await db.execute("DELETE FROM chat_messages")
+            await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tech'")
+            await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'acc'")
+            await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'tradein'")
+            await db.execute("UPDATE claim_counters SET last_number = 0 WHERE category = 'complaint'")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise

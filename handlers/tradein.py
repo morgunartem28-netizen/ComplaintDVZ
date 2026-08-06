@@ -1,16 +1,24 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
-from database import create_claim, get_admins_by_role, get_claim, update_claim_status, add_claim_history, log_action, try_update_claim_status
-from keyboards import get_tradein_admin_decision, get_main_menu, get_tradein_sim_buttons, get_tradein_condition_buttons
+from aiogram.utils.formatting import Text, Bold
+from database import create_claim, get_admins_by_role, get_claim, add_claim_history, log_action, try_update_claim_status
+from keyboards import (
+    get_tradein_admin_decision, get_main_menu, get_tradein_sim_buttons, get_tradein_condition_buttons,
+    get_tradein_screen_condition_buttons, get_tradein_body_condition_buttons,
+    get_tradein_repair_choice_buttons, get_tradein_payment_buttons, get_tradein_competitor_offer_buttons,
+    append_chat_button_row, get_chat_button
+)
 from states import TradeinState, TradeinAdminFSM
 from bot_instance import bot
+from filters import IsTradeinAdmin
 import asyncio
 import logging
 import time
 from utils.validation import is_valid_date_ddmmyyyy
 from utils.markdown import escape_markdown
+from utils.telegram_helpers import get_telegram_name, safe_delete_message, build_user_mention, deny_access
+from utils.notifications import notify_super_admins_of_decision
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -18,13 +26,7 @@ logger = logging.getLogger(__name__)
 DKP_LINK = "https://example.com/dkp"
 MEDIA_GROUP_TTL_SECONDS = 120
 
-async def _safe_delete_message(cb: CallbackQuery):
-    try:
-        await cb.message.delete()
-    except TelegramBadRequest:
-        return
-    except Exception as exc:
-        logger.warning("Failed to delete message in tradein flow: %s", exc)
+_safe_delete_message = safe_delete_message
 
 
 def _cleanup_pending_media_groups():
@@ -40,11 +42,6 @@ def _cleanup_pending_media_groups():
             timer.cancel()
         _pending_media_groups.pop(media_group_id, None)
 
-
-def get_telegram_name(user) -> str:
-    if getattr(user, "username", None):
-        return f"@{user.username}"
-    return user.full_name or ""
 
 # ==========================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -72,11 +69,17 @@ async def tradein_back_handler(cb: CallbackQuery, state: FSMContext):
         "sim": TradeinState.sim,
         "memory": TradeinState.memory,
         "condition": TradeinState.condition,
+        "screen_condition": TradeinState.screen_condition,
+        "body_condition": TradeinState.body_condition,
         "battery": TradeinState.battery,
+        "repair_choice": TradeinState.repair_choice,
         "repair": TradeinState.repair,
         "equipment": TradeinState.equipment,
         "activation_date": TradeinState.activation_date,
         "target_model": TradeinState.target_model,
+        "payment_method": TradeinState.payment_method,
+        "competitor_offer": TradeinState.competitor_offer,
+        "receiver_name": TradeinState.receiver_name,
         "photos": TradeinState.photos,
     }
     
@@ -88,22 +91,52 @@ async def tradein_back_handler(cb: CallbackQuery, state: FSMContext):
 
     await _safe_delete_message(cb)
 
+    data = await state.get_data()
+    # Из battery назад: если «Следы эксплуатации» → корпус, иначе → состояние
+    battery_back = (
+        "body_condition"
+        if data.get("condition") == "Следы эксплуатации"
+        else "condition"
+    )
+
     prompts = {
         "model": ("🔄 **Trade-in**\n\nУкажите модель устройства. Пример: iPhone 14", None),
         "sim": ("📱 Выберите тип SIM:", "model"),
         "memory": ("💾 Укажите память устройства:", "sim"),
         "condition": ("🔍 Выберите состояние устройства:", "memory"),
-        "battery": ("🔋 Укажите какой % у аккумулятора:", "condition"),
-        "repair": ("🔧 Укажите был ли ремонт, если да, то что ремонтировалось:", "battery"),
-        "equipment": ("📦 Укажите комплектацию сдаваемого устройства:", "repair"),
+        "screen_condition": ("📱 Выберите состояние экрана:", "condition"),
+        "body_condition": ("📦 Выберите состояние корпуса:", "screen_condition"),
+        "battery": ("🔋 Укажите какой % у аккумулятора:", battery_back),
+        "repair_choice": ("🔧 Были ли ремонты устройства?", "battery"),
+        "repair": ("🔧 Укажите, что ремонтировалось:", "repair_choice"),
+        "equipment": ("📦 Укажите комплектацию сдаваемого устройства:", "repair_choice"),
         "activation_date": ("📅 Укажите дату активации устройства:\n\nПроверить дату активации можно на сайте:\nhttps://checkcoverage.apple.com/?locale=ru\\_RU", "equipment"),
         "target_model": ("🎯 Укажите какую модель планируют брать:", "activation_date"),
-        "photos": ("📸 Отправьте 2-3 фотографии устройства (одним сообщением):", "target_model"),
+        "payment_method": ("💳 Выберите форму оплаты:", "target_model"),
+        "competitor_offer": ("🥊 Укажите сумму выкупа, предложенную конкурентом (или «Не оценивали»):", "payment_method"),
+        "receiver_name": ("👤 Введите ФИО сотрудника, принимающего устройство:", "competitor_offer"),
+        "photos": ("📸 Отправьте 2-3 фотографии устройства (одним сообщением):", "receiver_name"),
     }
 
     prompt_text, back_target = prompts.get(callback_state, ("Продолжите ввод:", None))
-    
-    if back_target:
+
+    # Шаги с выбором кнопок — восстанавливаем клавиатуру
+    if callback_state == "condition":
+        kb = get_tradein_condition_buttons()
+        if back_target:
+            kb.inline_keyboard.append([back_btn(back_target)])
+        await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    elif callback_state == "screen_condition":
+        kb = get_tradein_screen_condition_buttons()
+        if back_target:
+            kb.inline_keyboard.append([back_btn(back_target)])
+        await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    elif callback_state == "body_condition":
+        kb = get_tradein_body_condition_buttons()
+        if back_target:
+            kb.inline_keyboard.append([back_btn(back_target)])
+        await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
+    elif back_target:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(back_target)]])
         await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     else:
@@ -206,17 +239,30 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
         
         await state.clear()
         await cb.message.answer(
-            "❌ **Отказано в принятии в Trade-in**\n\n"
-            "Устройство разбитое и не принимается в программу Trade-in.\n\n",
+            "❌ **Приём в Trade-in невозможен!**",
             parse_mode="Markdown",
             reply_markup=get_main_menu()
         )
         await cb.answer("Отказано: устройство разбитое")
         return
-    
-    # === ПРОДОЛЖЕНИЕ ДЛЯ "КАК НОВЫЙ" И "СЛЕДЫ ЭКСПЛУАТАЦИИ" ===
+
     await _safe_delete_message(cb)
-    
+
+    # === «СЛЕДЫ ЭКСПЛУАТАЦИИ» — сначала экран, затем корпус ===
+    if cb.data == "tradein_cond_used":
+        kb = get_tradein_screen_condition_buttons()
+        kb.inline_keyboard.append([back_btn("condition")])
+        await cb.message.answer(
+            "📱 Выберите состояние экрана:",
+            reply_markup=kb
+        )
+        await state.set_state(TradeinState.screen_condition)
+        await cb.answer(f"Выбрано: {condition}")
+        return
+
+    # === «КАК НОВЫЙ» — сразу к аккумулятору ===
+    # Сбрасываем детали экрана/корпуса, если ранее выбирали «Следы эксплуатации»
+    await state.update_data(screen_condition=None, body_condition=None)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("condition")]])
     await cb.message.answer(
         "🔋 Укажите какой % у аккумулятора:",
@@ -224,6 +270,65 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
     )
     await state.set_state(TradeinState.battery)
     await cb.answer(f"Выбрано: {condition}")
+
+
+# ---------------------------------------------------------
+# СОСТОЯНИЕ ЭКРАНА (для «Следы эксплуатации»)
+# ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("tradein_screen_"), TradeinState.screen_condition)
+async def tradein_screen_condition_selected(cb: CallbackQuery, state: FSMContext):
+    screen_map = {
+        "tradein_screen_none": "Без дефектов",
+        "tradein_screen_minor": "Мелкие царапины",
+        "tradein_screen_deep": "Глубокие царапины",
+        "tradein_screen_chips": "Сколы",
+    }
+    screen_condition = screen_map.get(cb.data)
+    if not screen_condition:
+        await cb.answer("Ошибка выбора состояния экрана", show_alert=True)
+        return
+
+    await state.update_data(screen_condition=screen_condition)
+    await _safe_delete_message(cb)
+
+    kb = get_tradein_body_condition_buttons()
+    kb.inline_keyboard.append([back_btn("screen_condition")])
+    await cb.message.answer(
+        "📦 Выберите состояние корпуса:",
+        reply_markup=kb
+    )
+    await state.set_state(TradeinState.body_condition)
+    await cb.answer(f"Выбрано: {screen_condition}")
+
+
+# ---------------------------------------------------------
+# СОСТОЯНИЕ КОРПУСА (для «Следы эксплуатации»)
+# ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("tradein_body_"), TradeinState.body_condition)
+async def tradein_body_condition_selected(cb: CallbackQuery, state: FSMContext):
+    body_map = {
+        "tradein_body_none": "Без дефектов",
+        "tradein_body_minor": "Мелкие царапины",
+        "tradein_body_deep": "Глубокие царапины",
+        "tradein_body_chips": "Сколы",
+    }
+    body_condition = body_map.get(cb.data)
+    if not body_condition:
+        await cb.answer("Ошибка выбора состояния корпуса", show_alert=True)
+        return
+
+    await state.update_data(body_condition=body_condition)
+    await _safe_delete_message(cb)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("body_condition")]])
+    await cb.message.answer(
+        "🔋 Укажите какой % у аккумулятора:",
+        reply_markup=kb
+    )
+    await state.set_state(TradeinState.battery)
+    await cb.answer(f"Выбрано: {body_condition}")
 
 
 @router.message(TradeinState.battery)
@@ -234,12 +339,42 @@ async def tradein_battery_received(message: Message, state: FSMContext):
         return
     
     await state.update_data(battery=battery)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("battery")]])
+    kb = get_tradein_repair_choice_buttons()
+    kb.inline_keyboard.append([back_btn("battery")])
     await message.answer(
-        "🔧 Укажите был ли ремонт, если да, то что ремонтировалось:",
+        "🔧 Были ли ремонты устройства?",
         reply_markup=kb
     )
-    await state.set_state(TradeinState.repair)
+    await state.set_state(TradeinState.repair_choice)
+
+
+# ---------------------------------------------------------
+# РЕМОНТ — БЫЛ / НЕ БЫЛ (CALLBACK ОБРАБОТЧИКИ)
+# ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("tradein_repair_"), TradeinState.repair_choice)
+async def tradein_repair_choice_selected(cb: CallbackQuery, state: FSMContext):
+    if cb.data == "tradein_repair_none":
+        await state.update_data(repair="Без ремонтов")
+        await _safe_delete_message(cb)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("repair_choice")]])
+        await cb.message.answer(
+            "📦 Укажите комплектацию сдаваемого устройства:",
+            reply_markup=kb
+        )
+        await state.set_state(TradeinState.equipment)
+        await cb.answer("Без ремонтов")
+    elif cb.data == "tradein_repair_specify":
+        await _safe_delete_message(cb)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("repair_choice")]])
+        await cb.message.answer(
+            "🔧 Укажите, что ремонтировалось (например: замена дисплея, замена аккумулятора, после воды):",
+            reply_markup=kb
+        )
+        await state.set_state(TradeinState.repair)
+        await cb.answer("Укажите ремонты")
+    else:
+        await cb.answer("Ошибка выбора", show_alert=True)
 
 
 @router.message(TradeinState.repair)
@@ -250,7 +385,7 @@ async def tradein_repair_received(message: Message, state: FSMContext):
         return
     
     await state.update_data(repair=repair)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("repair")]])
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("repair_choice")]])
     await message.answer(
         "📦 Укажите комплектацию сдаваемого устройства:",
         reply_markup=kb
@@ -307,7 +442,91 @@ async def tradein_target_model_received(message: Message, state: FSMContext):
         return
     
     await state.update_data(target_model=target_model)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("target_model")]])
+    kb = get_tradein_payment_buttons()
+    kb.inline_keyboard.append([back_btn("target_model")])
+    await message.answer(
+        "💳 Выберите форму оплаты:",
+        reply_markup=kb
+    )
+    await state.set_state(TradeinState.payment_method)
+
+
+# ---------------------------------------------------------
+# ФОРМА ОПЛАТЫ — CALLBACK ОБРАБОТЧИКИ
+# ---------------------------------------------------------
+
+@router.callback_query(F.data.startswith("tradein_pay_"), TradeinState.payment_method)
+async def tradein_payment_selected(cb: CallbackQuery, state: FSMContext):
+    payment_map = {
+        "tradein_pay_cash": "Наличные",
+        "tradein_pay_card": "Банковская карта",
+        "tradein_pay_credit": "Кредит/Рассрочка",
+    }
+    payment_method = payment_map.get(cb.data)
+    if not payment_method:
+        await cb.answer("Ошибка выбора", show_alert=True)
+        return
+    
+    await state.update_data(payment_method=payment_method)
+    await _safe_delete_message(cb)
+    
+    kb = get_tradein_competitor_offer_buttons()
+    kb.inline_keyboard.append([back_btn("payment_method")])
+    await cb.message.answer(
+        "🥊 Укажите сумму выкупа, предложенную конкурентом (если есть).\n"
+        "Если устройство ранее нигде не оценивалось, нажмите «Не оценивали».",
+        reply_markup=kb
+    )
+    await state.set_state(TradeinState.competitor_offer)
+    await cb.answer(f"Выбрано: {payment_method}")
+
+
+# ---------------------------------------------------------
+# ПРЕДЛОЖЕНИЕ КОНКУРЕНТА — ТЕКСТ ИЛИ "НЕ ОЦЕНИВАЛИ"
+# ---------------------------------------------------------
+
+@router.callback_query(F.data == "tradein_competitor_none", TradeinState.competitor_offer)
+async def tradein_competitor_offer_none(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(competitor_offer="Не оценивали")
+    await _safe_delete_message(cb)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("competitor_offer")]])
+    await cb.message.answer(
+        "👤 Введите ФИО сотрудника, принимающего устройство:",
+        reply_markup=kb
+    )
+    await state.set_state(TradeinState.receiver_name)
+    await cb.answer("Не оценивали")
+
+
+@router.message(TradeinState.competitor_offer)
+async def tradein_competitor_offer_received(message: Message, state: FSMContext):
+    competitor_offer = message.text.strip()
+    if not competitor_offer:
+        await message.answer("⚠️ Укажите сумму выкупа от конкурента или нажмите «Не оценивали»:")
+        return
+    
+    await state.update_data(competitor_offer=competitor_offer)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("competitor_offer")]])
+    await message.answer(
+        "👤 Введите ФИО сотрудника, принимающего устройство:",
+        reply_markup=kb
+    )
+    await state.set_state(TradeinState.receiver_name)
+
+
+# ---------------------------------------------------------
+# ФИО СОТРУДНИКА, ПРИНИМАЮЩЕГО УСТРОЙСТВО
+# ---------------------------------------------------------
+
+@router.message(TradeinState.receiver_name)
+async def tradein_receiver_name_received(message: Message, state: FSMContext):
+    receiver_name = message.text.strip()
+    if not receiver_name:
+        await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:")
+        return
+
+    await state.update_data(receiver_name=receiver_name)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn("receiver_name")]])
     await message.answer(
         "📸 Отправьте 2-3 фотографии устройства (одним сообщением):",
         reply_markup=kb
@@ -347,7 +566,7 @@ async def tradein_photos_received(message: Message, state: FSMContext):
             await message.answer(
                 f"📸 Получено {len(existing)} фото. Отправьте ещё минимум 1 фото.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [back_btn("target_model")]
+                    [back_btn("receiver_name")]
                 ])
             )
         return
@@ -413,7 +632,7 @@ async def _process_media_group(media_group_id: str, state: FSMContext, message: 
                     user_id,
                     f"📸 Получено {len(existing)} фото. Нужно минимум 2. Отправьте ещё.",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [back_btn("target_model")]
+                        [back_btn("receiver_name")]
                     ])
                 )
                 break
@@ -476,10 +695,15 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
     """Обработка заявки Trade-in"""
     data = await state.get_data()
     
-    required_keys = ['model', 'sim', 'memory', 'condition', 'battery', 'repair', 'equipment', 'activation_date', 'target_model', 'tradein_photos']
+    required_keys = [
+        'model', 'sim', 'memory', 'condition', 'battery', 'repair', 'equipment',
+        'activation_date', 'target_model', 'payment_method', 'competitor_offer',
+        'receiver_name', 'tradein_photos'
+    ]
     missing_keys = [key for key in required_keys if key not in data or not data[key]]
     if missing_keys:
         await message.answer(f"❌ Ошибка: отсутствуют данные ({', '.join(missing_keys)}). Начните заново.")
+        logger.warning("Tradein claim submission missing keys %s for user_id=%s", missing_keys, user.id)
         await state.clear()
         return
 
@@ -487,14 +711,27 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
     sim = data['sim']
     memory = data['memory']
     condition = data['condition']
+    screen_condition = data.get('screen_condition')
+    body_condition = data.get('body_condition')
     battery = data['battery']
     repair = data['repair']
     equipment = data['equipment']
     activation_date = data['activation_date']
     target_model = data['target_model']
+    payment_method = data['payment_method']
+    competitor_offer = data['competitor_offer']
+    receiver_name = data['receiver_name']
     photos = data['tradein_photos']
 
     photos_str = "|".join(photos)
+
+    # Детали экрана/корпуса — только для «Следы эксплуатации»
+    wear_lines = ""
+    if condition == "Следы эксплуатации":
+        if screen_condition:
+            wear_lines += f"📱 Экран: {screen_condition}\n"
+        if body_condition:
+            wear_lines += f"📦 Корпус: {body_condition}\n"
 
     claim_data = {
         'category': 'tradein',
@@ -504,15 +741,20 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
             f"📱 SIM: {sim}\n"
             f"💾 Память: {memory}\n"
             f"🔍 Состояние: {condition}\n"
+            f"{wear_lines}"
             f"🔋 Аккумулятор: {battery}\n"
             f"🔧 Ремонт: {repair}\n"
-            f"📦 Комплектация: {equipment}"
+            f"📦 Комплектация: {equipment}\n"
+            f"💳 Оплата: {payment_method}\n"
+            f"🥊 Предложение конкурента: {competitor_offer}"
         ),
         'purchase_date': activation_date,
         'client_wish': f"Хочет взять: {target_model}",
         'photo': photos_str,
-        'client_name': '—',
-        'tg_name': get_telegram_name(user)
+        'client_name': receiver_name,
+        'tg_name': get_telegram_name(user),
+        'payment_method': payment_method,
+        'competitor_offer': competitor_offer,
     }
 
     try:
@@ -534,6 +776,7 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
                 parse_mode="Markdown",
                 reply_markup=get_main_menu()
             )
+            await message.answer("Обсуждение заявки:", reply_markup=get_chat_button(internal_id))
             break
         except Exception as e:
             if attempt < 2:
@@ -541,27 +784,38 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
                 continue
             logger.error("Failed to notify tradein user: %s", e)
 
-    # Подготовка текста для админа
-    tt_link = f"tg://user?id={user.id}"
-    tt_display = f"[{escape_markdown(user.full_name)}]({tt_link})"
-    
-    caption = (
-        f"🔄 **НОВАЯ ЗАЯВКА (Trade-in) {display_id}**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **ТТ:** {tt_display}\n"
-        f"📱 **Модель:** {model}\n"
-        f"📱 **SIM:** {sim}\n"
-        f"💾 **Память:** {memory}\n"
-        f"🔍 **Состояние:** {condition}\n"
-        f"🔋 **Аккумулятор:** {battery}\n"
-        f"🔧 **Ремонт:** {repair}\n"
-        f"📦 **Комплектация:** {equipment}\n"
-        f"📅 **Активация:** {activation_date}\n"
-        f"🎯 **Планирует взять:** {target_model}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-    )
+    # Подготовка текста для админа (Text(...) + text_mention для ТТ — см.
+    # utils/telegram_helpers.build_user_mention: работает даже если админ
+    # никогда раньше не пересекался с этим Telegram-аккаунтом).
+    caption_parts = [
+        "🔄 ", Bold(f"НОВАЯ ЗАЯВКА (Trade-in) {display_id}"), "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        "👤 ", Bold("ТТ:"), " ", build_user_mention(user.id, user.full_name), "\n",
+        "📱 ", Bold("Модель:"), " ", model, "\n",
+        "📱 ", Bold("SIM:"), " ", sim, "\n",
+        "💾 ", Bold("Память:"), " ", memory, "\n",
+        "🔍 ", Bold("Состояние:"), " ", condition, "\n",
+    ]
+    if condition == "Следы эксплуатации":
+        if screen_condition:
+            caption_parts.extend(["📱 ", Bold("Экран:"), " ", screen_condition, "\n"])
+        if body_condition:
+            caption_parts.extend(["📦 ", Bold("Корпус:"), " ", body_condition, "\n"])
+    caption_parts.extend([
+        "🔋 ", Bold("Аккумулятор:"), " ", battery, "\n",
+        "🔧 ", Bold("Ремонт:"), " ", repair, "\n",
+        "📦 ", Bold("Комплектация:"), " ", equipment, "\n",
+        "📅 ", Bold("Активация:"), " ", activation_date, "\n",
+        "🎯 ", Bold("Планирует взять:"), " ", target_model, "\n",
+        "💳 ", Bold("Форма оплаты:"), " ", payment_method, "\n",
+        "🥊 ", Bold("Предложение конкурента:"), " ", competitor_offer, "\n",
+        "🧑‍💼 ", Bold("Принял устройство:"), " ", receiver_name, "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ])
+    content = Text(*caption_parts)
 
     keyboard = get_tradein_admin_decision(internal_id)
+    append_chat_button_row(keyboard, internal_id)
 
     target_admins = await get_admins_by_role('admin_tradein')
     if not target_admins:
@@ -579,6 +833,7 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
     media_list = [InputMediaPhoto(media=photo_id) for photo_id in photos]
     
     # Отправляем админам с обработкой ошибок
+    notified = 0
     for admin_id in target_admins:
         for attempt in range(3):
             try:
@@ -586,10 +841,10 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
                     await bot.send_media_group(chat_id=admin_id, media=media_list)
                 await bot.send_message(
                     chat_id=admin_id,
-                    text=caption,
                     reply_markup=keyboard,
-                    parse_mode="Markdown"
+                    **content.as_kwargs()
                 )
+                notified += 1
                 break  # Успешно отправлено
             except Exception as e:
                 if attempt < 2:
@@ -597,12 +852,13 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
                     await asyncio.sleep(1 * (attempt + 1))
                     continue
                 logger.error("Critical tradein send failure to admin %s: %s", admin_id, e)
+    logger.info("Tradein claim %s notified %s/%s admins", display_id, notified, len(target_admins))
 
 # ==========================================
 # ОБРАБОТКА РЕШЕНИЙ АДМИНА (ОДОБРИТЬ / ОТКАЗАТЬ)
 # ==========================================
 
-@router.callback_query(F.data.startswith("adm_tradein_reject_"))
+@router.callback_query(F.data.startswith("adm_tradein_reject_"), IsTradeinAdmin())
 async def tradein_admin_reject(cb: CallbackQuery, state: FSMContext):
     try:
         claim_id = int(cb.data.split("_")[-1])
@@ -611,13 +867,6 @@ async def tradein_admin_reject(cb: CallbackQuery, state: FSMContext):
         claim = await get_claim(claim_id)
         if not claim:
             await cb.answer("Заявка не найдена", show_alert=True)
-            return
-        
-        # Проверка доступа
-        from database import get_user_role
-        role = await get_user_role(cb.from_user.id)
-        if role not in ['super_admin', 'admin_tradein']:
-            await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
             return
         
         # === АТОМАРНАЯ ПРОВЕРКА ===
@@ -648,36 +897,40 @@ async def tradein_admin_reject(cb: CallbackQuery, state: FSMContext):
         # Редактируем сообщение админа
         current_text = cb.message.text or ""
         new_text = f"{current_text}\n\n❌ ОТКАЗАНО (Админ: {escape_markdown(full_name)})\nПричина: Устройство запрещено к принятию"
-        await cb.message.edit_text(text=new_text, parse_mode="Markdown")
+        await cb.message.edit_text(text=new_text, parse_mode="Markdown", reply_markup=get_chat_button(claim_id))
         
-        # Уведомление сотруднику
+        # Уведомление сотруднику (TextMention — клик открывает чат с админом)
         user_id = claim.get('user_id')
         try:
+            content = Text(
+                f"❌ Заявка {display_id}\n\n",
+                "Устройство запрещено к принятию в Trade-in.\n",
+                "Решение принял: ", build_user_mention(cb.from_user.id, full_name),
+            )
             await bot.send_message(
                 user_id,
-                f"❌ Заявка {display_id}\n\nУстройство запрещено к принятию в Trade-in.\n"
-                f"Решение принял: {escape_markdown(full_name)}"
+                reply_markup=get_chat_button(claim_id),
+                **content.as_kwargs(),
             )
         except Exception as exc:
             logger.warning("Failed to notify tradein reject to user: %s", exc)
-        
+
+        await notify_super_admins_of_decision(
+            claim, cb.from_user.id, full_name, "Отказано",
+            "Устройство запрещено к принятию"
+        )
+
         await cb.answer("Отказ отправлен сотруднику")
+        logger.info("Tradein claim %s rejected by admin_id=%s", display_id, cb.from_user.id)
             
     except Exception as e:
         logger.error("Tradein reject handler error: %s", e)
         await cb.answer("Произошла ошибка при обработке.")
 
 
-@router.callback_query(F.data.startswith("adm_tradein_approve_"))
+@router.callback_query(F.data.startswith("adm_tradein_approve_"), IsTradeinAdmin())
 async def tradein_admin_approve_start(cb: CallbackQuery, state: FSMContext):
     claim_id = int(cb.data.split("_")[-1])
-    
-    # Проверка доступа
-    from database import get_user_role
-    role = await get_user_role(cb.from_user.id)
-    if role not in ['super_admin', 'admin_tradein']:
-        await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
-        return
     
     claim = await get_claim(claim_id)
     if not claim:
@@ -695,17 +948,22 @@ async def tradein_admin_approve_start(cb: CallbackQuery, state: FSMContext):
         )
         return
     
-    await state.update_data(tradein_claim_id=claim_id, tradein_admin_name=cb.from_user.full_name or "Админ")
+    await state.update_data(
+        tradein_claim_id=claim_id,
+        tradein_admin_name=cb.from_user.full_name or "Админ",
+        tradein_admin_id=cb.from_user.id,
+    )
     await cb.message.answer("💰 Введите стоимость выкупа:")
     await state.set_state(TradeinAdminFSM.waiting_for_price)
     await cb.answer("Введите стоимость выкупа")
 
 
-@router.message(TradeinAdminFSM.waiting_for_price)
+@router.message(TradeinAdminFSM.waiting_for_price, IsTradeinAdmin())
 async def tradein_admin_approve_finish(message: Message, state: FSMContext):
     data = await state.get_data()
     claim_id = data.get('tradein_claim_id')
-    admin_name = data.get('tradein_admin_name', 'Админ')
+    admin_name = data.get('tradein_admin_name') or message.from_user.full_name or "Админ"
+    admin_id = data.get('tradein_admin_id') or message.from_user.id
     
     if not claim_id:
         await message.answer("❌ Ошибка: ID заявки не найден.")
@@ -723,17 +981,13 @@ async def tradein_admin_approve_finish(message: Message, state: FSMContext):
         await state.clear()
         return
     
-    # Проверка доступа
-    from database import get_user_role
-    role = await get_user_role(message.from_user.id)
-    if role not in ['super_admin', 'admin_tradein']:
-        await message.answer("⛔ У вас нет прав для обработки этой заявки.")
-        await state.clear()
-        return
-    
+    # Оплата, выбранная сотрудником при оформлении заявки, фиксируется и в решении
+    payment_method = claim.get('payment_method') or 'Не указано'
+    decision_comment = f"Выкуп: {price}. Оплата: {payment_method}"
+
     # === АТОМАРНАЯ ПРОВЕРКА перед финальным одобрением ===
     success, updated_claim = await try_update_claim_status(
-        claim_id, 'approved', comment=f"Выкуп: {price}", admin_name=admin_name
+        claim_id, 'approved', comment=decision_comment, admin_name=admin_name
     )
     
     if success is None:
@@ -754,22 +1008,43 @@ async def tradein_admin_approve_finish(message: Message, state: FSMContext):
     old_status = claim.get('status', "pending")
     display_id = claim.get('display_id', f'#{claim_id}')
     
-    await add_claim_history(claim_id, display_id, old_status, 'approved', message.from_user.id, admin_name, f"Выкуп: {price}")
-    await log_action(message.from_user.id, 'tradein_approve', claim_id)
+    await add_claim_history(claim_id, display_id, old_status, 'approved', admin_id, admin_name, decision_comment)
+    await log_action(admin_id, 'tradein_approve', claim_id)
     await state.clear()
     
-    await message.answer(f"✅ Заявка {display_id} одобрена. Выкуп: {price}")
+    await message.answer(f"✅ Заявка {display_id} одобрена. Выкуп: {price}", reply_markup=get_chat_button(claim_id))
     
-    # Уведомление сотруднику
+    # Уведомление сотруднику (TextMention для «Ответственный» — клик открывает чат с админом)
     user_id = claim.get('user_id')
     try:
+        content = Text(
+            "✅ ", Bold("Устройство одобрено к принятию в Trade in."), "\n\n",
+            "💰 ", Bold("Стоимость выкупа:"), " ", price, "\n",
+            "👨‍💼 ", Bold("Ответственный:"), " ", build_user_mention(admin_id, admin_name), "\n\n",
+            "📎 ", Bold("Ссылка на ДКП:"), " ", DKP_LINK,
+        )
         await bot.send_message(
             user_id,
-            f"✅ **Устройство одобрено к принятию в Trade in.**\n\n"
-            f"💰 **Стоимость выкупа:** {price}\n"
-            f"👨‍💼 **Ответственный:** {escape_markdown(admin_name)}\n\n"
-            f"📎 **Ссылка на ДКП:** {DKP_LINK}",
-            parse_mode="Markdown"
+            reply_markup=get_chat_button(claim_id),
+            **content.as_kwargs(),
         )
     except Exception as e:
         logger.error("Failed to notify tradein approval to user: %s", e)
+
+    await notify_super_admins_of_decision(
+        claim, admin_id, admin_name, "Одобрено", decision_comment
+    )
+    logger.info("Tradein claim %s approved by admin_id=%s price=%s", display_id, admin_id, price)
+
+
+# Fallback: если IsTradeinAdmin не пропустил решение (например, у отправителя
+# отозвали права), явно сообщаем об этом вместо молчания бота.
+@router.callback_query(F.data.startswith("adm_tradein_reject_"))
+@router.callback_query(F.data.startswith("adm_tradein_approve_"))
+async def tradein_admin_action_denied(cb: CallbackQuery):
+    await deny_access(cb)
+
+
+@router.message(TradeinAdminFSM.waiting_for_price)
+async def tradein_admin_approve_finish_denied(message: Message):
+    await deny_access(message)

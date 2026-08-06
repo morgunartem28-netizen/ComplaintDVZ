@@ -2,14 +2,17 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils.formatting import Text, Bold
 from database import create_claim, get_admins_by_role
-from keyboards import get_wish_buttons, get_admin_decision, get_stock_adjustment_request_buttons, get_main_menu
+from keyboards import (
+    get_wish_buttons, get_admin_decision, get_stock_adjustment_request_buttons, get_main_menu,
+    append_chat_button_row, get_chat_button
+)
 from states import AccState
 from bot_instance import bot
 import logging
 from utils.validation import is_valid_date_ddmmyyyy
-from utils.markdown import escape_markdown
+from utils.telegram_helpers import get_telegram_name, safe_delete_message, build_user_mention
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -18,12 +21,6 @@ WISH_NAMES = {
     "wish_return": "Возврат",
     "wish_exchange": "Обмен"
 }
-
-
-def get_telegram_name(user) -> str:
-    if getattr(user, "username", None):
-        return f"@{user.username}"
-    return user.full_name or ""
 
 
 def back_btn(target_state: AccState) -> InlineKeyboardButton:
@@ -54,12 +51,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
         await cb.answer("Ошибка навигации", show_alert=True)
         return
 
-    try:
-        await cb.message.delete()
-    except TelegramBadRequest:
-        pass
-    except Exception as exc:
-        logger.warning("Failed to delete message in accessories flow: %s", exc)
+    await safe_delete_message(cb)
 
     if target_state == AccState.client_name:
         await cb.message.answer("👤 Укажите своё имя и фамилию:")
@@ -246,37 +238,41 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
         return
 
     await state.clear()
-    await cb.message.answer(f"✅ Заявка {display_id} (Аксессуар) создана!", parse_mode="Markdown")
+    await cb.message.answer(
+        f"✅ Заявка {display_id} (Аксессуар) создана!",
+        parse_mode="Markdown",
+        reply_markup=get_chat_button(internal_id)
+    )
 
     target_admins = await get_admins_by_role('admin_acc')
     if not target_admins:
         await cb.message.answer("⚠️ Ошибка системы: нет администраторов для обработки заявки.")
         return
 
-    tt_link = f"tg://user?id={cb.from_user.id}"
-    tt_display = f"[{escape_markdown(cb.from_user.full_name)}]({tt_link})"
-    
-    caption = (
-        f"🆕 **НОВАЯ ЗАЯВКА (Аксессуар) {display_id}**\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **ТТ:** {tt_display}\n"
-        f"👤 **Сотрудник:** {client_name}\n"
-        f"📦 **Номенклатура:** {nomenclature}\n"
-        f"📅 **Дата продажи:** {date_sale}\n"
-        f"📝 **Дефект:** {defect}\n"
-        f"💬 **Требование клиента:** {wish_ru}\n\n"
+    content = Text(
+        "🆕 ", Bold(f"НОВАЯ ЗАЯВКА (Аксессуар) {display_id}"), "\n\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        "👤 ", Bold("ТТ:"), " ", build_user_mention(cb.from_user.id, cb.from_user.full_name), "\n",
+        "👤 ", Bold("Сотрудник:"), " ", client_name, "\n",
+        "📦 ", Bold("Номенклатура:"), " ", nomenclature, "\n",
+        "📅 ", Bold("Дата продажи:"), " ", date_sale, "\n",
+        "📝 ", Bold("Дефект:"), " ", defect, "\n",
+        "💬 ", Bold("Требование клиента:"), " ", wish_ru, "\n\n",
     )
-    
-    keyboard = get_admin_decision(internal_id)
 
+    keyboard = get_admin_decision(internal_id)
+    append_chat_button_row(keyboard, internal_id)
+
+    notified = 0
     for admin_id in target_admins:
         try:
             await bot.send_photo(
                 chat_id=admin_id,
                 photo=photo_id,
-                caption=caption,
                 reply_markup=keyboard,
-                parse_mode="Markdown"
+                **content.as_caption_kwargs()
             )
+            notified += 1
         except Exception as e:
             logger.error("Failed sending accessories claim %s to admin %s: %s", display_id, admin_id, e)
+    logger.info("Accessories claim %s notified %s/%s admins", display_id, notified, len(target_admins))

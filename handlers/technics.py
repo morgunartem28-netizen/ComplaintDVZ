@@ -1,15 +1,15 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.utils.formatting import Text, Bold, Italic
 from database import create_claim, get_admins_by_role, update_claim_status
-from keyboards import get_mp_buttons, get_warranty_status_buttons, get_imei_missing_button
+from keyboards import get_mp_buttons, get_warranty_status_buttons, get_imei_missing_button, append_chat_button_row, get_chat_button
 from states import TechState
 from bot_instance import bot
 from datetime import datetime, date
 import logging
 from utils.validation import is_valid_date_ddmmyyyy
-from utils.markdown import escape_markdown
+from utils.telegram_helpers import get_telegram_name, safe_delete_message, build_user_mention
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -18,18 +18,7 @@ def build_brand_with_imei(device_name: str, imei: str) -> str:
     imei_value = (imei or "").strip() or "IMEI отсутствует"
     return f"{device_name} | IMEI: {imei_value}"
 
-def get_telegram_name(user) -> str:
-    if getattr(user, "username", None):
-        return f"@{user.username}"
-    return user.full_name or ""
-
-async def _safe_delete_message(cb: CallbackQuery):
-    try:
-        await cb.message.delete()
-    except TelegramBadRequest:
-        return
-    except Exception as exc:
-        logger.warning("Failed to delete message in technics flow: %s", exc)
+_safe_delete_message = safe_delete_message
 
 # ==========================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ КНОПОК "НАЗАД"
@@ -250,44 +239,50 @@ async def process_ptv_claim(message: Message, state: FSMContext, user):
         return
 
     await state.clear()
-    await message.answer(f"✅ Ваша заявка **{display_id}** (Б/У) принята в обработку!", parse_mode="Markdown")
+    await message.answer(
+        f"✅ Ваша заявка **{display_id}** (ПТВ) принята в обработку!",
+        parse_mode="Markdown",
+        reply_markup=get_chat_button(internal_id)
+    )
 
-    tt_link = f"tg://user?id={user.id}"
-    tt_display = f"[{escape_markdown(user.full_name)}]({tt_link})"
     warranty_display = "Предоставлен" if warranty_status == "has_photo" else "Утерян"
-    
-    request_text = (
-        f"📱 **НОВАЯ ЗАЯВКА (Б/У) {display_id}**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **Клиент:** {client_name}\n"
-        f"📱 **Устройство:** {device_name}\n"
-        f"📱 **IMEI:** {imei}\n"
-        f"📝 **Дефект:**\n_{defect}_\n"
-        f"🔧 **Мех. повреждения:** {mp_status}\n"
-        f"📅 **Дата покупки:** {purchase_date}\n"
-        f"⏳ **Прошло:** {days_text}\n"
-        f"📄 **Гарантийный талон:** {warranty_display}\n"
-        f"👤 **ТТ:** {tt_display}"
+
+    content = Text(
+        "📱 ", Bold(f"НОВАЯ ЗАЯВКА (ПТВ) {display_id}"), "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        "👤 ", Bold("Клиент:"), " ", client_name, "\n",
+        "📱 ", Bold("Устройство:"), " ", device_name, "\n",
+        "📱 ", Bold("IMEI:"), " ", imei, "\n",
+        "📝 ", Bold("Дефект:"), "\n", Italic(defect), "\n",
+        "🔧 ", Bold("Мех. повреждения:"), " ", mp_status, "\n",
+        "📅 ", Bold("Дата покупки:"), " ", purchase_date, "\n",
+        "⏳ ", Bold("Прошло:"), " ", days_text, "\n",
+        "📄 ", Bold("Гарантийный талон:"), " ", warranty_display, "\n",
+        "👤 ", Bold("ТТ:"), " ", build_user_mention(user.id, user.full_name),
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Возврат/Обмен", callback_data=f"adm_ptv_return_{internal_id}")],
         [InlineKeyboardButton(text="🔧 Гарантийное обслуживание", callback_data=f"adm_ptv_repair_{internal_id}")]
     ])
+    append_chat_button_row(kb, internal_id)
 
     admins = await get_admins_by_role('admin_tech')
     if not admins:
         logger.error("No tech admins for PTV claim %s", display_id)
         return
 
+    notified = 0
     for admin_id in admins:
         try:
             if media_list:
                 await bot.send_media_group(chat_id=admin_id, media=media_list)
-            await bot.send_message(chat_id=admin_id, text=request_text, parse_mode="Markdown")
+            await bot.send_message(chat_id=admin_id, **content.as_kwargs())
             await bot.send_message(chat_id=admin_id, text="Выберите решение по заявке:", reply_markup=kb)
+            notified += 1
         except Exception as e:
             logger.error("Failed to send PTV claim %s to admin %s: %s", display_id, admin_id, e)
+    logger.info("PTV claim %s notified %s/%s tech admins", display_id, notified, len(admins))
 
 # ==========================================
 # ОБРАБОТЧИКИ "НАЗАД" ДЛЯ ТЕХНИКИ
@@ -612,25 +607,23 @@ async def process_new_device_claim(message: Message, state: FSMContext, user):
 
     await message.answer(
         f"✅ Ваша заявка {display_id} принята!\n\n{client_instruction}",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=get_chat_button(internal_id)
     )
 
-    tt_link = f"tg://user?id={user.id}"
-    tt_display = f"[{escape_markdown(user.full_name)}]({tt_link})"
-    
-    request_text = (
-        f"📱 **НОВАЯ ЗАЯВКА (Новое устройство) {display_id}**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **ТТ:** {tt_display}\n"
-        f"📱 **Устройство:** {device_name}\n"
-        f"📱 **IMEI:** {imei}\n"
-        f"👤 **Клиент:** {client_name}\n"
-        f"📝 **Дефект:**\n_{defect}_\n"
-        f"📅 **Дата покупки:** {purchase_date}\n"
-        f"⏳ **Прошло:** {days_text}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 **Автоматическое решение системы:**\n"
-        f"{action_text}"
+    content = Text(
+        "📱 ", Bold(f"НОВАЯ ЗАЯВКА (Новое устройство) {display_id}"), "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        "👤 ", Bold("ТТ:"), " ", build_user_mention(user.id, user.full_name), "\n",
+        "📱 ", Bold("Устройство:"), " ", device_name, "\n",
+        "📱 ", Bold("IMEI:"), " ", imei, "\n",
+        "👤 ", Bold("Клиент:"), " ", client_name, "\n",
+        "📝 ", Bold("Дефект:"), "\n", Italic(defect), "\n",
+        "📅 ", Bold("Дата покупки:"), " ", purchase_date, "\n",
+        "⏳ ", Bold("Прошло:"), " ", days_text, "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        "📌 ", Bold("Автоматическое решение системы:"), "\n",
+        action_text,
     )
 
     admins = await get_admins_by_role('admin_tech')
@@ -638,10 +631,17 @@ async def process_new_device_claim(message: Message, state: FSMContext, user):
         logger.error("No tech admins for new-device claim %s", display_id)
         return
 
+    notified = 0
     for admin_id in admins:
         try:
             if media_list:
                 await bot.send_media_group(chat_id=admin_id, media=media_list)
-            await bot.send_message(chat_id=admin_id, text=request_text, parse_mode="Markdown")
+            await bot.send_message(
+                chat_id=admin_id,
+                reply_markup=get_chat_button(internal_id),
+                **content.as_kwargs()
+            )
+            notified += 1
         except Exception as e:
             logger.error("Failed sending new-device claim %s to admin %s: %s", display_id, admin_id, e)
+    logger.info("New-device claim %s (status=%s) notified %s/%s tech admins", display_id, status, notified, len(admins))

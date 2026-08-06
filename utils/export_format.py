@@ -95,7 +95,7 @@ _PARSE_DATETIME_FORMATS = (
 
 
 def format_datetime_export(value) -> str:
-    """Единый формат для Excel: ДД.ММ.ГГГГ ЧЧ:ММ (без секунд)."""
+    """Единый формат для Excel/CSV: ДД.ММ.ГГГГ ЧЧ:ММ (без секунд)."""
     if value is None:
         return ""
 
