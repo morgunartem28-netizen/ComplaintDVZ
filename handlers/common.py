@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
+from aiogram.types import CallbackQuery, Message, InlineQuery, InlineQueryResultArticle, InputTextMessageContent
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import Text, Italic
 from database import (
@@ -14,7 +14,10 @@ from states import TechState, AccState, TradeinState
 from filters import IsSuperAdmin
 import re
 import logging
-from utils.telegram_helpers import build_user_mention
+from utils.telegram_helpers import (
+    build_user_mention, cleanup_tracked_messages, FLOW_CANCEL_CALLBACK,
+    track_message, with_cancel_button, cancel_only_keyboard,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -58,6 +61,30 @@ async def cmd_cancel(message: Message, state: FSMContext):
         "Операция отменена.\n\nВыберите категорию:",
         reply_markup=get_main_menu()
     )
+
+
+# Единая точка отмены сценария заявки с инлайн-кнопки "❌ Отмена", которая
+# добавляется на КАЖДОМ шаге любого FSM (см. utils.telegram_helpers.with_cancel_button
+# / cancel_only_keyboard). Регистрируется один раз здесь и работает для всех
+# сценариев (Техника, Аксессуары, Trade-in, Корректировка остатков) — новым
+# сценариям не нужно писать собственный обработчик отмены.
+@router.callback_query(F.data == FLOW_CANCEL_CALLBACK)
+async def cb_flow_cancel(cb: CallbackQuery, state: FSMContext):
+    current_state = await state.get_state()
+    await cleanup_tracked_messages(cb.bot, state)
+    await state.clear()
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    if current_state is None:
+        text = "Нет активной операции для отмены."
+    else:
+        text = "Операция отменена.\n\nВыберите категорию:"
+    if cb.message:
+        await cb.bot.send_message(cb.message.chat.id, text, reply_markup=get_main_menu())
+    await cb.answer()
+
 
 # Команда панели супер-администратора. Зарегистрирована здесь (в common_router,
 # который в main.py подключается ПЕРВЫМ), а не в handlers/admin.py — иначе она
@@ -103,26 +130,33 @@ async def admin_panel_denied(message: Message):
 @router.message(F.text == "Техника")
 async def tech_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Выберите тип обращения:", reply_markup=get_tech_type_buttons())
+    sent = await message.answer(
+        "Выберите тип обращения:",
+        reply_markup=with_cancel_button(get_tech_type_buttons())
+    )
+    await track_message(state, sent)
     await state.set_state(TechState.type_choice)
 
 @router.message(F.text == "Trade-in")
 async def tradein_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
+    sent = await message.answer(
         "Trade-in\n\nУкажите модель устройства. Пример: iPhone 14",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=cancel_only_keyboard()
     )
+    await track_message(state, sent)
     await state.set_state(TradeinState.model)
 
 @router.message(F.text == "Запрос на корректировку остатков")
 async def adjustment_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
+    sent = await message.answer(
         "Запрос на корректировку остатков\n\n"
         "Выберите тип корректировки:",
-        reply_markup=get_adjustment_type_buttons()
+        reply_markup=with_cancel_button(get_adjustment_type_buttons())
     )
+    await track_message(state, sent)
 
 @router.inline_query(F.query)
 async def inline_search_claim(inline_query: InlineQuery):

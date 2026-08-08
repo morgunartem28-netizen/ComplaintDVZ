@@ -15,7 +15,10 @@ from bot_instance import bot
 from filters import IsComplaintAdmin
 import logging
 from utils.validation import is_valid_date_ddmmyyyy, parse_money
-from utils.telegram_helpers import get_telegram_name, safe_delete_message, build_user_mention, deny_access
+from utils.telegram_helpers import (
+    get_telegram_name, safe_delete_message, build_user_mention, deny_access,
+    with_cancel_button, cancel_only_keyboard, track_message,
+)
 from utils.notifications import notify_super_admins_of_decision
 from handlers.complaint_shared import send_to_complaint_admins
 from handlers.tech_adjustment import _start_tech_adjustment_claim_link_step
@@ -57,7 +60,8 @@ async def adjustment_acc_selected(cb: CallbackQuery, state: FSMContext):
     )
     # Запускаем алгоритм аксессуаров
     from states import AccState
-    await cb.message.answer("Укажите свое имя и фамилию:")
+    sent = await cb.message.answer("Укажите свое имя и фамилию:", reply_markup=cancel_only_keyboard())
+    await track_message(state, sent)
     await state.set_state(AccState.client_name)
     await cb.answer("Перенаправляем на создание заявки на аксессуар")
 
@@ -67,10 +71,11 @@ async def adjustment_tech_selected(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(adjustment_scope="tech")
     await _safe_delete_message(cb)
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Необходимо провести возврат или обмен техники?",
-        reply_markup=get_return_or_exchange_buttons()
+        reply_markup=with_cancel_button(get_return_or_exchange_buttons())
     )
+    await track_message(state, sent)
     await cb.answer("Выберите тип операции")
 
 
@@ -88,9 +93,11 @@ async def choose_return(cb: CallbackQuery, state: FSMContext):
         return
 
     await _safe_delete_message(cb)
-    await cb.message.answer(
-        "Запрос на корректировку остатков (Возврат)\n\nУкажите стоимость товара (только число, например: 12990):"
+    sent = await cb.message.answer(
+        "Запрос на корректировку остатков (Возврат)\n\nУкажите стоимость товара (только число, например: 12990):",
+        reply_markup=cancel_only_keyboard()
     )
+    await track_message(state, sent)
     await state.set_state(ComplaintFSM.waiting_price)
     await cb.answer("Введите стоимость товара")
 
@@ -105,9 +112,11 @@ async def choose_exchange(cb: CallbackQuery, state: FSMContext):
         return
 
     await _safe_delete_message(cb)
-    await cb.message.answer(
-        "Запрос на корректировку остатков (Обмен)\n\nУкажите стоимость аксессуара, который вернули (только число):"
+    sent = await cb.message.answer(
+        "Запрос на корректировку остатков (Обмен)\n\nУкажите стоимость аксессуара, который вернули (только число):",
+        reply_markup=cancel_only_keyboard()
     )
+    await track_message(state, sent)
     await state.set_state(ExchangeFSM.waiting_returned_price)
     await cb.answer("Введите стоимость товара")
 
@@ -115,6 +124,144 @@ async def choose_exchange(cb: CallbackQuery, state: FSMContext):
 # ==========================================
 # ОБЩИЙ ОБРАБОТЧИК "ВЕРНУТЬСЯ В НАЧАЛО"
 # ==========================================
+
+@router.callback_query(F.data.startswith("complaint_back_"))
+async def complaint_back_handler(cb: CallbackQuery, state: FSMContext):
+    """Кнопка "Назад" для старого флоу возврата аксессуаров (ComplaintFSM).
+
+    Восстанавливает ровно тот же вопрос+клавиатуру, что показывались при
+    первом входе в целевое состояние (см. choose_return/choose_return_old
+    и return_price_old)."""
+    target = cb.data.replace("complaint_back_", "")
+    await _safe_delete_message(cb)
+
+    if target == "waiting_price":
+        sent = await cb.message.answer(
+            "Запрос на корректировку остатков (Возврат)\n\nУкажите стоимость товара (только число, например: 12990):",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
+        await state.set_state(ComplaintFSM.waiting_price)
+    elif target == "waiting_refund_method":
+        kb = get_diff_method_buttons()
+        kb.inline_keyboard.append([back_btn_complaint('waiting_price')])
+        sent = await cb.message.answer("Выберите способ возврата:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
+        await state.set_state(ComplaintFSM.waiting_refund_method)
+    else:
+        logger.warning("Unknown complaint back target: %s", target)
+        await cb.answer("Ошибка навигации", show_alert=True)
+        return
+
+    await cb.answer("Вернулись на шаг назад")
+
+
+@router.callback_query(F.data.startswith("exchange_back_"))
+async def exchange_back_handler(cb: CallbackQuery, state: FSMContext):
+    """Кнопка "Назад" для старого флоу обмена аксессуаров (ExchangeFSM).
+
+    Как и complaint_back_handler, восстанавливает тот же вопрос+клавиатуру,
+    что и при первом входе в целевое состояние (см. exchange_returned_price_old,
+    exchange_new_item_old, exchange_new_price_old, exchange_diff_method_old,
+    _exchange_accessory_date_confirmed). Для waiting_diff_method/waiting_exchange_date
+    текст зависит от знака разницы (exchange_diff) — восстанавливаем его из state."""
+    target = cb.data.replace("exchange_back_", "")
+    await _safe_delete_message(cb)
+    data = await state.get_data()
+
+    if target == "waiting_returned_price":
+        sent = await cb.message.answer(
+            "Запрос на корректировку остатков (Обмен)\n\nУкажите стоимость аксессуара, который вернули (только число):",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
+        await state.set_state(ExchangeFSM.waiting_returned_price)
+
+    elif target == "waiting_new_item":
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_returned_price')]])
+        sent = await cb.message.answer(
+            "Укажите номенклатуру аксессуара, который выдали:",
+            reply_markup=with_cancel_button(kb)
+        )
+        await track_message(state, sent)
+        await state.set_state(ExchangeFSM.waiting_new_item)
+
+    elif target == "waiting_new_price":
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_new_item')]])
+        sent = await cb.message.answer(
+            "Укажите цену выданного аксессуара (только число):",
+            reply_markup=with_cancel_button(kb)
+        )
+        await track_message(state, sent)
+        await state.set_state(ExchangeFSM.waiting_new_price)
+
+    elif target == "waiting_diff_method":
+        diff = data.get('exchange_diff', 0)
+        kb = get_diff_method_buttons()
+        kb.inline_keyboard.append([back_btn_exchange('waiting_new_price')])
+        if diff > 0:
+            text = (
+                "Расчет разницы:\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"Необходимо принять доплату от клиента: {diff:.0f}\n\n"
+                "Выберите способ приема доплаты:"
+            )
+        else:
+            text = (
+                "Расчет разницы:\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"Сумма к возврату клиенту: {abs(diff):.0f}\n"
+                "Не забудьте выдать клиенту!\n\n"
+                "Выберите способ возврата:"
+            )
+        sent = await cb.message.answer(text, reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
+        await state.set_state(ExchangeFSM.waiting_diff_method)
+
+    elif target == "waiting_exchange_date":
+        diff = data.get('exchange_diff', 0)
+        diff_method = data.get('exchange_diff_method')
+        if diff == 0:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_new_price')]])
+            text = (
+                "Расчет разницы:\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "Доплата не требуется (разница: 0)\n\n"
+                "Укажите дату обмена в формате ДД.ММ.ГГГГ:"
+            )
+        else:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_diff_method')]])
+            if diff > 0:
+                text = (
+                    f"Способ приема доплаты: {diff_method}\n\n"
+                    "Укажите дату обмена в формате ДД.ММ.ГГГГ:"
+                )
+            else:
+                text = (
+                    f"Способ возврата разницы: {diff_method}\n\n"
+                    "Укажите дату обмена в формате ДД.ММ.ГГГГ:"
+                )
+        sent = await cb.message.answer(text, reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
+        await state.set_state(ExchangeFSM.waiting_exchange_date)
+
+    elif target == "waiting_receipt_voided":
+        kb = get_receipt_voided_buttons()
+        kb.inline_keyboard.append([back_btn_exchange('waiting_exchange_date')])
+        sent = await cb.message.answer(
+            "Чек пробит и аннулирован?",
+            reply_markup=with_cancel_button(kb)
+        )
+        await track_message(state, sent)
+        await state.set_state(ExchangeFSM.waiting_receipt_voided)
+
+    else:
+        logger.warning("Unknown exchange back target: %s", target)
+        await cb.answer("Ошибка навигации", show_alert=True)
+        return
+
+    await cb.answer("Вернулись на шаг назад")
+
 
 @router.callback_query(F.data == "acc_stock_back")
 async def stock_back_to_start(cb: CallbackQuery, state: FSMContext):
@@ -156,44 +303,28 @@ async def stock_request_start(cb: CallbackQuery, state: FSMContext):
 
     await _safe_delete_message(cb)
 
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Запрос на корректировку остатков\n\nВыберите тип операции:",
-        reply_markup=get_return_or_exchange_buttons()
+        reply_markup=with_cancel_button(get_return_or_exchange_buttons())
     )
+    await track_message(state, sent)
     await cb.answer("Выберите тип операции")
-
-
-@router.callback_query(F.data == "choose_return_old_acc")
-async def choose_return_old(cb: CallbackQuery, state: FSMContext):
-    await _safe_delete_message(cb)
-    await cb.message.answer(
-        "Запрос на корректировку остатков (Возврат)\n\nУкажите стоимость товара (только число, например: 12990):"
-    )
-    await state.set_state(ComplaintFSM.waiting_price)
-    await cb.answer("Введите стоимость товара")
-
-
-@router.callback_query(F.data == "choose_exchange_old_acc")
-async def choose_exchange_old(cb: CallbackQuery, state: FSMContext):
-    await _safe_delete_message(cb)
-    await cb.message.answer(
-        "Запрос на корректировку остатков (Обмен)\n\nУкажите стоимость аксессуара, который вернули (только число):"
-    )
-    await state.set_state(ExchangeFSM.waiting_returned_price)
-    await cb.answer("Введите стоимость товара")
 
 
 @router.message(ComplaintFSM.waiting_price)
 async def return_price_old(message: Message, state: FSMContext):
+    await track_message(state, message)
     price = message.text.strip()
     if parse_money(price) is None:
-        await message.answer("Введите корректную стоимость (только число):")
+        sent = await message.answer("Введите корректную стоимость (только число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
 
     await state.update_data(complaint_price=price)
     kb = get_diff_method_buttons()
     kb.inline_keyboard.append([back_btn_complaint('waiting_price')])
-    await message.answer("Выберите способ возврата:", reply_markup=kb)
+    sent = await message.answer("Выберите способ возврата:", reply_markup=with_cancel_button(kb))
+    await track_message(state, sent)
     await state.set_state(ComplaintFSM.waiting_refund_method)
 
 
@@ -211,18 +342,18 @@ async def return_refund_method_old(cb: CallbackQuery, state: FSMContext):
     await state.update_data(complaint_refund_method=method)
     await cb.message.edit_text(
         "Укажите дату возврата в формате ДД.ММ.ГГГГ:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_complaint('waiting_refund_method')]])
+        reply_markup=with_cancel_button(
+            InlineKeyboardMarkup(inline_keyboard=[[back_btn_complaint('waiting_refund_method')]])
+        )
     )
+    await track_message(state, cb.message)
     await state.set_state(ComplaintFSM.waiting_refund_date)
     await cb.answer("Введите дату возврата")
 
 
-@router.message(ComplaintFSM.waiting_refund_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
-async def return_date_valid_old(message: Message, state: FSMContext):
-    refund_date = message.text.strip()
-    if not is_valid_date_ddmmyyyy(refund_date):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
-        return
+async def _complaint_refund_date_confirmed(target: Message | CallbackQuery, state: FSMContext, refund_date: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты возврата (старый флоу
+    возврата/обмена аксессуаров)."""
     await state.update_data(complaint_refund_date=refund_date)
 
     data = await state.get_data()
@@ -261,51 +392,79 @@ async def return_date_valid_old(message: Message, state: FSMContext):
     )
 
     logger.info("Complaint (accessory return) claim %s prepared for admin routing", display_id)
-    await send_to_complaint_admins(message, content, claim_id, display_id)
+    message_target = target.message if isinstance(target, CallbackQuery) else target
+    await send_to_complaint_admins(message_target, content, claim_id, display_id, state)
+
+
+@router.message(ComplaintFSM.waiting_refund_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def return_date_valid_old(message: Message, state: FSMContext):
+    await track_message(state, message)
+    refund_date = message.text.strip()
+    if not is_valid_date_ddmmyyyy(refund_date):
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
+        return
+    await _complaint_refund_date_confirmed(message, state, refund_date)
 
 
 @router.message(ComplaintFSM.waiting_refund_date)
-async def return_date_invalid_old(message: Message):
-    await message.answer("Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:")
+async def return_date_invalid_old(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
+    )
+    await track_message(state, sent)
 
 
 @router.message(ExchangeFSM.waiting_returned_price)
 async def exchange_returned_price_old(message: Message, state: FSMContext):
+    await track_message(state, message)
     price = message.text.strip()
     price_float = parse_money(price)
     if price_float is None:
-        await message.answer("Введите корректную стоимость (положительное число):")
+        sent = await message.answer("Введите корректную стоимость (положительное число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
 
     await state.update_data(exchange_returned_price=price_float)
-    await message.answer(
+    sent = await message.answer(
         "Укажите номенклатуру аксессуара, который выдали:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_returned_price')]])
+        reply_markup=with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_returned_price')]]))
     )
+    await track_message(state, sent)
     await state.set_state(ExchangeFSM.waiting_new_item)
 
 
 @router.message(ExchangeFSM.waiting_new_item)
 async def exchange_new_item_old(message: Message, state: FSMContext):
+    await track_message(state, message)
     item = message.text.strip()
     if not item:
-        await message.answer("Номенклатура не может быть пустой. Повторите ввод:")
+        sent = await message.answer("Номенклатура не может быть пустой. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
 
     await state.update_data(exchange_new_item=item)
-    await message.answer(
+    sent = await message.answer(
         "Укажите цену выданного аксессуара (только число):",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_new_item')]])
+        reply_markup=with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_new_item')]]))
     )
+    await track_message(state, sent)
     await state.set_state(ExchangeFSM.waiting_new_price)
 
 
 @router.message(ExchangeFSM.waiting_new_price)
 async def exchange_new_price_old(message: Message, state: FSMContext):
+    await track_message(state, message)
     price = message.text.strip()
     price_float = parse_money(price)
     if price_float is None:
-        await message.answer("Введите корректную цену (положительное число):")
+        sent = await message.answer("Введите корректную цену (положительное число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
 
     await state.update_data(exchange_new_price=price_float)
@@ -320,36 +479,40 @@ async def exchange_new_price_old(message: Message, state: FSMContext):
     if diff > 0:
         kb = get_diff_method_buttons()
         kb.inline_keyboard.append([back_btn_exchange('waiting_new_price')])
-        await message.answer(
+        sent = await message.answer(
             f"Расчет разницы:\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Необходимо принять доплату от клиента: {diff:.0f}\n\n"
             f"Выберите способ приема доплаты:",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(ExchangeFSM.waiting_diff_method)
 
     elif diff < 0:
         kb = get_diff_method_buttons()
         kb.inline_keyboard.append([back_btn_exchange('waiting_new_price')])
-        await message.answer(
+        sent = await message.answer(
             f"Расчет разницы:\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Сумма к возврату клиенту: {abs(diff):.0f}\n"
             f"Не забудьте выдать клиенту!\n\n"
             f"Выберите способ возврата:",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(ExchangeFSM.waiting_diff_method)
 
     else:
-        await message.answer(
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_new_price')]])
+        sent = await message.answer(
             f"Расчет разницы:\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Доплата не требуется (разница: 0)\n\n"
             f"Укажите дату обмена в формате ДД.ММ.ГГГГ:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_new_price')]])
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.update_data(exchange_diff_method=None)
         await state.set_state(ExchangeFSM.waiting_exchange_date)
 
@@ -370,43 +533,63 @@ async def exchange_diff_method_old(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     diff = data.get('exchange_diff', 0)
 
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_diff_method')]])
     if diff > 0:
         await cb.message.edit_text(
             f"Способ приема доплаты: {method}\n\n"
             f"Укажите дату обмена в формате ДД.ММ.ГГГГ:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_diff_method')]])
+            reply_markup=with_cancel_button(back_kb)
         )
     else:
         await cb.message.edit_text(
             f"Способ возврата разницы: {method}\n\n"
             f"Укажите дату обмена в формате ДД.ММ.ГГГГ:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_exchange('waiting_diff_method')]])
+            reply_markup=with_cancel_button(back_kb)
         )
+    await track_message(state, cb.message)
 
     await state.set_state(ExchangeFSM.waiting_exchange_date)
     await cb.answer("Введите дату обмена")
 
 
-@router.message(ExchangeFSM.waiting_exchange_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
-async def exchange_date_valid_old(message: Message, state: FSMContext):
-    exchange_date = message.text.strip()
-    if not is_valid_date_ddmmyyyy(exchange_date):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
-        return
-    await state.update_data(exchange_date=exchange_date)
+async def _exchange_accessory_date_confirmed(target: Message | CallbackQuery, state: FSMContext, exchange_date_str: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты обмена (старый флоу
+    возврата/обмена аксессуаров)."""
+    await state.update_data(exchange_date=exchange_date_str)
 
     kb = get_receipt_voided_buttons()
     kb.inline_keyboard.append([back_btn_exchange('waiting_exchange_date')])
-    await message.answer(
+    answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
+    sent = await answer(
         "Чек пробит и аннулирован?",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(ExchangeFSM.waiting_receipt_voided)
 
 
+@router.message(ExchangeFSM.waiting_exchange_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def exchange_date_valid_old(message: Message, state: FSMContext):
+    await track_message(state, message)
+    exchange_date_str = message.text.strip()
+    if not is_valid_date_ddmmyyyy(exchange_date_str):
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
+        return
+    await _exchange_accessory_date_confirmed(message, state, exchange_date_str)
+
+
 @router.message(ExchangeFSM.waiting_exchange_date)
-async def exchange_date_invalid_old(message: Message):
-    await message.answer("Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:")
+async def exchange_date_invalid_old(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
+    )
+    await track_message(state, sent)
 
 
 @router.callback_query(F.data.startswith("receipt_"), ExchangeFSM.waiting_receipt_voided)
@@ -475,7 +658,7 @@ async def exchange_receipt_voided_old(cb: CallbackQuery, state: FSMContext):
     )
 
     logger.info("Complaint (accessory exchange) claim %s prepared for admin routing", display_id)
-    await send_to_complaint_admins(cb.message, content, claim_id, display_id)
+    await send_to_complaint_admins(cb.message, content, claim_id, display_id, state)
     await cb.answer("Запрос сформирован и отправлен")
 
 

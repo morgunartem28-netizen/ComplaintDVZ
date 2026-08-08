@@ -6,13 +6,17 @@ from aiogram.utils.formatting import Text, Bold
 from database import create_claim, get_admins_by_role
 from keyboards import (
     get_wish_buttons, get_admin_decision, get_stock_adjustment_request_buttons, get_main_menu,
-    append_chat_button_row, get_chat_button
+    append_chat_button_row, get_chat_button, append_take_into_work_row, strip_take_into_work_row
 )
 from states import AccState
 from bot_instance import bot
 import logging
 from utils.validation import is_valid_date_ddmmyyyy
-from utils.telegram_helpers import get_telegram_name, safe_delete_message, build_user_mention
+from utils.telegram_helpers import (
+    get_telegram_name, safe_delete_message, build_user_mention,
+    with_cancel_button, cancel_only_keyboard, track_message, cleanup_tracked_messages,
+    register_take_into_work_card,
+)
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -54,39 +58,44 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
     await safe_delete_message(cb)
 
     if target_state == AccState.client_name:
-        await cb.message.answer("👤 Укажите своё имя и фамилию:")
+        sent = await cb.message.answer("👤 Укажите своё имя и фамилию:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         await state.set_state(AccState.client_name)
     
     elif target_state == AccState.nomenclature:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.client_name)]])
-        await cb.message.answer(
+        sent = await cb.message.answer(
             "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(AccState.nomenclature)
     
     elif target_state == AccState.date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.nomenclature)]])
-        await cb.message.answer(
+        sent = await cb.message.answer(
             "📅 Укажите дату продажи в формате ДД.ММ.ГГГГ (например: 25.10.2023):",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(AccState.date)
     
     elif target_state == AccState.photo:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.date)]])
-        await cb.message.answer(
+        sent = await cb.message.answer(
             "📸 Отправьте фото упаковки товара (обязательно):",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(AccState.photo)
     
     elif target_state == AccState.defect:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.photo)]])
-        await cb.message.answer(
+        sent = await cb.message.answer(
             "📝 Опишите дефект со слов клиента:",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(AccState.defect)
 
     await cb.answer("Вернулись на шаг назад")
@@ -99,85 +108,113 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
 @router.message(F.text == "Аксессуар")
 async def acc_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("👤 Укажите своё имя и фамилию:")
+    sent = await message.answer("👤 Укажите своё имя и фамилию:", reply_markup=cancel_only_keyboard())
+    await track_message(state, sent)
     await state.set_state(AccState.client_name)
 
 
 @router.message(AccState.client_name)
 async def acc_client_name_received(message: Message, state: FSMContext):
+    await track_message(state, message)
     client_name = message.text.strip()
     if not client_name:
-        await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:")
+        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     
     await state.update_data(client_name=client_name)
-    await message.answer(
-        "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):"
+    sent = await message.answer(
+        "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):",
+        reply_markup=cancel_only_keyboard()
     )
+    await track_message(state, sent)
     await state.set_state(AccState.nomenclature)
 
 
 @router.message(AccState.nomenclature)
 async def acc_nomenclature_received(message: Message, state: FSMContext):
+    await track_message(state, message)
     nomenclature = message.text.strip()
     if not nomenclature:
-        await message.answer("⚠️ Номенклатура не может быть пустой. Повторите ввод:")
+        sent = await message.answer("⚠️ Номенклатура не может быть пустой. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     
     await state.update_data(nomenclature=nomenclature)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.nomenclature)]])
-    await message.answer(
+    sent = await message.answer(
         "📅 Укажите дату продажи в формате ДД.ММ.ГГГГ (например: 25.10.2023):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(AccState.date)
+
+
+async def _acc_sale_date_confirmed(target: Message | CallbackQuery, state: FSMContext, date_str: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты продажи."""
+    await state.update_data(date=date_str)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.date)]])
+    answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
+    sent = await answer(
+        "📸 Отправьте фото упаковки товара (обязательно):",
+        reply_markup=with_cancel_button(kb)
+    )
+    await track_message(state, sent)
+    await state.set_state(AccState.photo)
 
 
 @router.message(AccState.date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
 async def acc_date_valid(message: Message, state: FSMContext):
+    await track_message(state, message)
     if not is_valid_date_ddmmyyyy(message.text):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
         return
-    await state.update_data(date=message.text)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.date)]])
-    await message.answer(
-        "📸 Отправьте фото упаковки товара (обязательно):",
-        reply_markup=kb
-    )
-    await state.set_state(AccState.photo)
+    await _acc_sale_date_confirmed(message, state, message.text)
 
 
 @router.message(AccState.date)
-async def acc_date_invalid(message: Message):
-    await message.answer(
-        "⚠️ Неверный формат даты!\nПожалуйста, введите дату ТОЛЬКО в формате ДД.ММ.ГГГГ:"
+async def acc_date_invalid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "⚠️ Неверный формат даты!\nПожалуйста, введите дату ТОЛЬКО в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
     )
+    await track_message(state, sent)
 
 
 @router.message(AccState.photo, F.photo)
 async def acc_photo_received(message: Message, state: FSMContext):
+    await track_message(state, message)
     await state.update_data(photo=message.photo[-1].file_id)
     
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(AccState.photo)]])
-    await message.answer(
+    sent = await message.answer(
         "📝 Опишите дефект со слов клиента:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(AccState.defect)
 
 
 @router.message(AccState.photo)
-async def acc_photo_not_received(message: Message):
-    await message.answer("⚠️ Пожалуйста, отправьте фото упаковки:")
+async def acc_photo_not_received(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото упаковки:", reply_markup=cancel_only_keyboard())
+    await track_message(state, sent)
 
 
 @router.message(AccState.defect)
 async def acc_defect_received(message: Message, state: FSMContext):
+    await track_message(state, message)
     defect = message.text.strip()
     if not defect:
-        await message.answer("⚠️ Описание дефекта не может быть пустым. Повторите ввод:")
+        sent = await message.answer("⚠️ Описание дефекта не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     
     await state.update_data(defect=defect)
@@ -185,10 +222,11 @@ async def acc_defect_received(message: Message, state: FSMContext):
     wish_kb = get_wish_buttons()
     wish_kb.inline_keyboard.append([back_btn(AccState.defect)])
     
-    await message.answer(
+    sent = await message.answer(
         "💬 Что требует клиент?",
-        reply_markup=wish_kb
+        reply_markup=with_cancel_button(wish_kb)
     )
+    await track_message(state, sent)
     await state.set_state(AccState.wish)
 
 
@@ -237,6 +275,10 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
+    # Заявка успешно создана — сценарий завершается, удаляем всю промежуточную
+    # переписку (вопросы бота/ответы пользователя) ДО очистки FSM-данных,
+    # т.к. state.clear() ниже стирает и список отслеженных сообщений.
+    await cleanup_tracked_messages(bot, state)
     await state.clear()
     await cb.message.answer(
         f"✅ Заявка {display_id} (Аксессуар) создана!",
@@ -262,16 +304,19 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
 
     keyboard = get_admin_decision(internal_id)
     append_chat_button_row(keyboard, internal_id)
+    append_take_into_work_row(keyboard, internal_id)
 
+    markup_after_take = strip_take_into_work_row(keyboard)
     notified = 0
     for admin_id in target_admins:
         try:
-            await bot.send_photo(
+            sent = await bot.send_photo(
                 chat_id=admin_id,
                 photo=photo_id,
                 reply_markup=keyboard,
                 **content.as_caption_kwargs()
             )
+            register_take_into_work_card(internal_id, sent.chat.id, sent.message_id, markup_after_take)
             notified += 1
         except Exception as e:
             logger.error("Failed sending accessories claim %s to admin %s: %s", display_id, admin_id, e)

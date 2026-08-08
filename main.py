@@ -14,6 +14,8 @@ from handlers.tech_adjustment import router as tech_adjustment_router
 from handlers.admin import router as admin_router
 from handlers.super_admin import router as super_admin_router
 from handlers.chat import router as chat_router
+from handlers.claim_timer import router as claim_timer_router
+from utils.claim_timer_service import claim_timer_loop
 
 # === ДОБАВЛЕНО ДЛЯ REPLIT ===
 from aiohttp import web
@@ -45,6 +47,7 @@ dp.include_router(tech_adjustment_router)
 dp.include_router(admin_router)
 dp.include_router(super_admin_router)
 dp.include_router(chat_router)
+dp.include_router(claim_timer_router)
 
 async def scheduler_task():
     logging.info("Планировщик архивации запущен (интервал: 24ч, порог: 365 дней)")
@@ -62,6 +65,7 @@ async def scheduler_task():
 async def main():
     await init_db()
     asyncio.create_task(scheduler_task())
+    asyncio.create_task(claim_timer_loop())
     
     # === ЗАПУСК ВЕБ-СЕРВЕРА ===
     asyncio.create_task(start_web_server())

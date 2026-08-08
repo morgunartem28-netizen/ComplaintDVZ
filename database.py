@@ -483,6 +483,26 @@ async def get_claim_responsible_admin_id(claim_id: int):
         return row[0] if row else None
 
 
+async def get_claim_responsible_admin_info(claim_id: int):
+    """(admin_id, admin_name) администратора, принявшего последнее решение по
+    заявке (по claim_history) — используется там, где нужно показать имя
+    ответственного сотрудника без похода в Telegram API (например, в
+    уведомлении об итоге сделки Trade-in). Возвращает (None, None), если по
+    заявке ещё нет ни одного решения."""
+    async with get_connection() as db:
+        cursor = await db.execute(
+            """
+            SELECT admin_id, admin_name FROM claim_history
+            WHERE claim_id = ? AND admin_id IS NOT NULL
+            ORDER BY changed_at DESC, id DESC
+            LIMIT 1
+            """,
+            (claim_id,)
+        )
+        row = await cursor.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+
 async def get_claim_chat_participants(claim: dict) -> dict:
     """Вычисляет участников чата заявки одним компактным набором запросов
     (без N+1: по одному запросу на список админов роли/супер-админов).
@@ -937,3 +957,107 @@ async def clear_all_claims():
         except Exception:
             await db.rollback()
             raise
+
+
+# ==========================================
+# ТАЙМЕР ОТСУТСТВИЯ ОТВЕТА НА ЗАЯВКУ (5/10/15 МИН)
+# ==========================================
+# "Взятие в работу" фиксируется ОДНИМ полем claims.taken_at, независимо от
+# того, произошло ли оно через кнопку "🕐 Взять в работу" (см. handlers/claim_timer.py)
+# или автоматически по первому сообщению ответственного администратора в чате
+# заявки (см. utils/claim_timer_service.stop_claim_timer_if_needed, вызывается
+# из handlers/chat.py). reminder_stage хранит, до какой стадии напоминаний
+# (0/1/2/3) уже дошла заявка, чтобы claim_timer_loop не рассылал повторные
+# уведомления на каждом цикле опроса.
+
+async def mark_claim_taken(claim_id: int, admin_id: int) -> bool:
+    """Фиксирует взятие заявки в работу, но только если это ещё не сделано
+    (первый успевший — забирает заявку). Возвращает True, если именно этот
+    вызов установил taken_at (гонка с другим админом/с чатом разрешена на
+    уровне SQL через `WHERE taken_at IS NULL`, а не в Python)."""
+    async with get_connection() as db:
+        cursor = await db.execute(
+            "UPDATE claims SET taken_at = CURRENT_TIMESTAMP, taken_by = ? WHERE id = ? AND taken_at IS NULL",
+            (admin_id, claim_id)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_overdue_claims_for_stage(stage: int, minutes: int) -> list[dict]:
+    """Заявки без реакции (не взяты в работу), которым уже пора напомнить
+    на стадии `stage` (1/2/3 — соответствуют порогам 5/10/15 минут).
+
+    `reminder_stage = stage - 1` гарантирует, что стадия обрабатывается ровно
+    один раз по очереди (стадия 2 не сработает, пока не отправлена стадия 1),
+    поэтому claim_timer_loop должен обходить стадии по возрастанию (1, 2, 3).
+    """
+    async with get_connection() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT * FROM claims
+            WHERE status = 'pending'
+              AND taken_at IS NULL
+              AND reminder_stage = ?
+              AND (julianday('now') - julianday(created_at)) * 24 * 60 >= ?
+            ORDER BY created_at ASC
+            """,
+            (stage - 1, minutes)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+async def set_claim_reminder_stage(claim_id: int, stage: int) -> None:
+    async with get_connection() as db:
+        await db.execute(
+            "UPDATE claims SET reminder_stage = ? WHERE id = ?",
+            (stage, claim_id)
+        )
+        await db.commit()
+
+
+async def get_responsible_admin_for_category(category: str) -> int | None:
+    """Временное упрощение: до момента "взятия в работу" в проекте нет понятия
+    персонального закрепления заявки за конкретным админом — "ответственным"
+    для личного напоминания на 5-минутной стадии считается ПЕРВЫЙ в списке
+    get_admins_by_role(...) для этой категории (список формируется из таблицы
+    users без гарантированного порядка "кто сейчас свободен/дежурит").
+
+    Более правильная альтернатива на будущее — round-robin (или дежурство по
+    графику) с отдельным полем/таблицей "текущий дежурный по категории", но
+    это не реализуется сейчас, чтобы не переусложнять таймер.
+    """
+    role_prefix = CLAIM_CATEGORY_ADMIN_ROLE.get(category)
+    if not role_prefix:
+        return None
+    admins = await get_admins_by_role(role_prefix)
+    return admins[0] if admins else None
+
+
+async def get_overdue_claims_detailed() -> list[dict]:
+    """Заявки без реакции по НОВОЙ логике таймера (5/10/15 минут), в отличие
+    от get_pending_claims() (просрочка > 2ч, используется в handlers/super_admin.py).
+
+    Не изменяет и не заменяет get_pending_claims() — отдельная функция ДЛЯ
+    БУДУЩЕГО подключения в разделе "⏳ Просроченные заявки" (см. отчёт агента),
+    возвращает дополнительно taken_at/reminder_stage для более точного
+    отображения текущей стадии просрочки каждой заявки.
+    """
+    async with get_connection() as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id, display_id, user_id, category, sub_category, created_at,
+                   tg_name, client_name, taken_at, taken_by, reminder_stage,
+                   (julianday('now') - julianday(created_at)) * 24 * 60 AS minutes_since_created
+            FROM claims
+            WHERE status = 'pending'
+              AND taken_at IS NULL
+              AND reminder_stage >= 1
+            ORDER BY created_at ASC
+            """
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]

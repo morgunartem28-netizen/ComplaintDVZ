@@ -23,7 +23,10 @@ from bot_instance import bot
 import re
 import logging
 from utils.validation import is_valid_date_ddmmyyyy, parse_money
-from utils.telegram_helpers import get_telegram_name, safe_delete_message, build_user_mention
+from utils.telegram_helpers import (
+    get_telegram_name, safe_delete_message, build_user_mention,
+    with_cancel_button, cancel_only_keyboard, track_message,
+)
 from handlers.complaint_shared import send_to_complaint_admins
 
 router = Router()
@@ -75,11 +78,12 @@ async def _start_tech_adjustment_claim_link_step(message: Message, state: FSMCon
         [InlineKeyboardButton(text="Назад", callback_data=op_callback)],
         [InlineKeyboardButton(text="Вернуться в начало", callback_data="acc_stock_back")]
     ])
-    await message.answer(
+    sent = await message.answer(
         "Введите номер заявки по технике в формате Т1, Т2, Т3.\n"
         "Если заявки нет, создайте обращение без привязки.",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.waiting_tech_claim_number)
 
 
@@ -92,16 +96,20 @@ async def _start_tech_adjustment_manual_flow(message: Message, state: FSMContext
         pulled_purchase_date=None
     )
     if op_type == "return":
-        await message.answer(
+        sent = await message.answer(
             "Запрос на корректировку остатков (Возврат)\n\n"
-            "Укажите номенклатуру из 1С, какую технику возвращают:"
+            "Укажите номенклатуру из 1С, какую технику возвращают:",
+            reply_markup=cancel_only_keyboard()
         )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_nomenclature)
     else:
-        await message.answer(
+        sent = await message.answer(
             "Запрос на корректировку остатков (Обмен)\n\n"
-            "Укажите номенклатуру из 1С, какую технику возвращают:"
+            "Укажите номенклатуру из 1С, какую технику возвращают:",
+            reply_markup=cancel_only_keyboard()
         )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_nomenclature)
 
 
@@ -118,22 +126,26 @@ def back_btn_tech_adj(target_state: str) -> InlineKeyboardButton:
 
 @router.message(TechAdjustmentFSM.return_nomenclature)
 async def return_nomenclature(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("Номенклатура не может быть пустой. Повторите ввод:")
+        sent = await message.answer("Номенклатура не может быть пустой. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(return_nomenclature=text)
     data = await state.get_data()
     if data.get("tech_adj_pulled"):
-        await message.answer("Укажите стоимость техники в 1С (только число):")
+        sent = await message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_price)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_nomenclature")]])
     kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="return_imei_missing")])
-    await message.answer(
+    sent = await message.answer(
         "Укажите IMEI устройства, если он есть:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_imei)
 
 
@@ -142,70 +154,94 @@ async def return_imei_missing(cb: CallbackQuery, state: FSMContext):
     await state.update_data(return_imei="IMEI отсутствует")
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_nomenclature")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Укажите стоимость техники в 1С (только число):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_price)
     await cb.answer("IMEI отсутствует")
 
 
 @router.message(TechAdjustmentFSM.return_imei)
 async def return_imei(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("IMEI не может быть пустым. Повторите ввод или нажмите кнопку:")
+        sent = await message.answer("IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(return_imei=text)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_nomenclature")]])
-    await message.answer(
+    sent = await message.answer(
         "Укажите стоимость техники в 1С (только число):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_price)
 
 
 @router.message(TechAdjustmentFSM.return_price)
 async def return_price(message: Message, state: FSMContext):
+    await track_message(state, message)
     price = message.text.strip()
     if parse_money(price) is None:
-        await message.answer("Введите корректную стоимость (только число):")
+        sent = await message.answer("Введите корректную стоимость (только число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(return_price=price)
     data = await state.get_data()
     if data.get("tech_adj_pulled") and data.get("return_purchase_date"):
-        await message.answer(
+        sent = await message.answer(
             "Выберите способ возврата:",
-            reply_markup=get_refund_method_buttons()
+            reply_markup=with_cancel_button(get_refund_method_buttons())
         )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_refund_method)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_imei")]])
-    await message.answer(
+    sent = await message.answer(
         "Укажите дату покупки в формате ДД.ММ.ГГГГ:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_purchase_date)
+
+
+async def _return_purchase_date_confirmed(target: Message | CallbackQuery, state: FSMContext, date_str: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты покупки при возврате техники."""
+    await state.update_data(return_purchase_date=date_str)
+    answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
+    sent = await answer(
+        "Выберите способ возврата:",
+        reply_markup=with_cancel_button(get_refund_method_buttons())
+    )
+    await track_message(state, sent)
+    await state.set_state(TechAdjustmentFSM.return_refund_method)
 
 
 @router.message(TechAdjustmentFSM.return_purchase_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
 async def return_purchase_date_valid(message: Message, state: FSMContext):
+    await track_message(state, message)
     date_text = message.text.strip()
     if not is_valid_date_ddmmyyyy(date_text):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
         return
-    await state.update_data(return_purchase_date=date_text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_price")]])
-    await message.answer(
-        "Выберите способ возврата:",
-        reply_markup=get_refund_method_buttons()
-    )
-    await state.set_state(TechAdjustmentFSM.return_refund_method)
+    await _return_purchase_date_confirmed(message, state, date_text)
 
 
 @router.message(TechAdjustmentFSM.return_purchase_date)
-async def return_purchase_date_invalid(message: Message):
-    await message.answer("Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:")
+async def return_purchase_date_invalid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
+    )
+    await track_message(state, sent)
 
 
 @router.callback_query(F.data.startswith("refund_"), TechAdjustmentFSM.return_refund_method)
@@ -221,32 +257,49 @@ async def return_refund_method(cb: CallbackQuery, state: FSMContext):
     await state.update_data(return_refund_method=method)
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_purchase_date")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Укажите дату возврата в формате ДД.ММ.ГГГГ:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_refund_date)
     await cb.answer("Введите дату возврата")
 
 
-@router.message(TechAdjustmentFSM.return_refund_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
-async def return_refund_date_valid(message: Message, state: FSMContext):
-    date_text = message.text.strip()
-    if not is_valid_date_ddmmyyyy(date_text):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
-        return
-    await state.update_data(return_refund_date=date_text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_refund_method")]])
-    await message.answer(
+async def _return_refund_date_confirmed(target: Message | CallbackQuery, state: FSMContext, date_str: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты возврата."""
+    await state.update_data(return_refund_date=date_str)
+    answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
+    sent = await answer(
         "Укажите нахождение товара:",
-        reply_markup=get_item_location_buttons()
+        reply_markup=with_cancel_button(get_item_location_buttons())
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_location)
 
 
+@router.message(TechAdjustmentFSM.return_refund_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def return_refund_date_valid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    date_text = message.text.strip()
+    if not is_valid_date_ddmmyyyy(date_text):
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
+        return
+    await _return_refund_date_confirmed(message, state, date_text)
+
+
 @router.message(TechAdjustmentFSM.return_refund_date)
-async def return_refund_date_invalid(message: Message):
-    await message.answer("Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:")
+async def return_refund_date_invalid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
+    )
+    await track_message(state, sent)
 
 
 @router.callback_query(F.data.startswith("loc_"), TechAdjustmentFSM.return_location)
@@ -262,10 +315,11 @@ async def return_location(cb: CallbackQuery, state: FSMContext):
     await state.update_data(return_location=location)
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_refund_date")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Чек пробит и аннулирован?",
-        reply_markup=get_receipt_voided_buttons()
+        reply_markup=with_cancel_button(get_receipt_voided_buttons())
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_receipt_voided)
     await cb.answer("Выберите Да или Нет")
 
@@ -283,19 +337,22 @@ async def return_receipt_voided(cb: CallbackQuery, state: FSMContext):
     await state.update_data(return_receipt_voided=answer)
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_location")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Укажите, с кем согласовано:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.return_approver)
     await cb.answer("Введите с кем согласовано")
 
 
 @router.message(TechAdjustmentFSM.return_approver)
 async def return_approver(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("Поле не может быть пустым. Повторите ввод:")
+        sent = await message.answer("Поле не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(return_approver=text)
 
@@ -355,7 +412,7 @@ async def return_approver(message: Message, state: FSMContext):
     )
 
     logger.info("Tech adjustment (return) claim %s created by user_id=%s", display_id, user_id)
-    await send_to_complaint_admins(message, content, internal_id, display_id)
+    await send_to_complaint_admins(message, content, internal_id, display_id, state)
     await state.clear()
 
 
@@ -365,9 +422,11 @@ async def return_approver(message: Message, state: FSMContext):
 
 @router.message(TechAdjustmentFSM.waiting_tech_claim_number)
 async def tech_adjustment_claim_number(message: Message, state: FSMContext):
+    await track_message(state, message)
     display_id = (message.text or "").strip().upper()
     if not re.match(r"^Т\d+$", display_id):
-        await message.answer("Неверный формат. Введите номер заявки в формате Т1, Т2, Т3.")
+        sent = await message.answer("Неверный формат. Введите номер заявки в формате Т1, Т2, Т3.", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
 
     claim = await get_claim_by_display_id_for_user(display_id, message.from_user.id)
@@ -380,11 +439,12 @@ async def tech_adjustment_claim_number(message: Message, state: FSMContext):
             [InlineKeyboardButton(text="Назад", callback_data=op_callback)],
             [InlineKeyboardButton(text="Вернуться в начало", callback_data="acc_stock_back")]
         ])
-        await message.answer(
+        sent = await message.answer(
             "Заявка не найдена по указанному номеру для вашего пользователя.\n"
             "Проверьте номер или продолжите без привязки к заявке.",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         return
 
     parsed = _parse_tech_claim_for_adjustment(claim)
@@ -399,14 +459,15 @@ async def tech_adjustment_claim_number(message: Message, state: FSMContext):
 
     kb = get_pull_data_buttons()
     kb.inline_keyboard.insert(1, [InlineKeyboardButton(text="Назад", callback_data="techadj_back_waiting_tech_claim_number")])
-    await message.answer(
+    sent = await message.answer(
         "Найдена тех-заявка:\n"
         f"Название: {parsed['nomenclature']}\n"
         f"IMEI: {parsed['imei']}\n"
         f"Дата покупки: {parsed['purchase_date']}\n\n"
         "Применить данные?",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.confirm_pull_data)
 
 
@@ -442,24 +503,30 @@ async def tech_adjustment_pull_data_decision(cb: CallbackQuery, state: FSMContex
     if op_type == "return":
         await state.update_data(return_imei=imei, return_purchase_date=purchase_date)
         if need_manual_nomenclature:
-            await cb.message.answer(
-                "Для старой ПТВ заявки нужно вручную указать название техники:"
+            sent = await cb.message.answer(
+                "Для старой ПТВ заявки нужно вручную указать название техники:",
+                reply_markup=cancel_only_keyboard()
             )
+            await track_message(state, sent)
             await state.set_state(TechAdjustmentFSM.return_nomenclature)
         else:
             await state.update_data(return_nomenclature=nomenclature)
-            await cb.message.answer("Укажите стоимость техники в 1С (только число):")
+            sent = await cb.message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=cancel_only_keyboard())
+            await track_message(state, sent)
             await state.set_state(TechAdjustmentFSM.return_price)
     else:
         await state.update_data(exchange_imei=imei, exchange_purchase_date=purchase_date)
         if need_manual_nomenclature:
-            await cb.message.answer(
-                "Для старой ПТВ заявки нужно вручную указать название техники:"
+            sent = await cb.message.answer(
+                "Для старой ПТВ заявки нужно вручную указать название техники:",
+                reply_markup=cancel_only_keyboard()
             )
+            await track_message(state, sent)
             await state.set_state(TechAdjustmentFSM.exchange_nomenclature)
         else:
             await state.update_data(exchange_nomenclature=nomenclature)
-            await cb.message.answer("Укажите стоимость техники в 1С (только число):")
+            sent = await cb.message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=cancel_only_keyboard())
+            await track_message(state, sent)
             await state.set_state(TechAdjustmentFSM.exchange_price)
 
     await cb.answer("Данные применены")
@@ -467,22 +534,26 @@ async def tech_adjustment_pull_data_decision(cb: CallbackQuery, state: FSMContex
 
 @router.message(TechAdjustmentFSM.exchange_nomenclature)
 async def exchange_nomenclature(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("Номенклатура не может быть пустой. Повторите ввод:")
+        sent = await message.answer("Номенклатура не может быть пустой. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_nomenclature=text)
     data = await state.get_data()
     if data.get("tech_adj_pulled"):
-        await message.answer("Укажите стоимость техники в 1С (только число):")
+        sent = await message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_price)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_nomenclature")]])
     kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="exchange_imei_missing")])
-    await message.answer(
+    sent = await message.answer(
         "Укажите IMEI устройства, если он есть:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_imei)
 
 
@@ -491,82 +562,110 @@ async def exchange_imei_missing(cb: CallbackQuery, state: FSMContext):
     await state.update_data(exchange_imei="IMEI отсутствует")
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_nomenclature")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Укажите стоимость техники в 1С (только число):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_price)
     await cb.answer("IMEI отсутствует")
 
 
 @router.message(TechAdjustmentFSM.exchange_imei)
 async def exchange_imei(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("IMEI не может быть пустым. Повторите ввод или нажмите кнопку:")
+        sent = await message.answer("IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_imei=text)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_nomenclature")]])
-    await message.answer(
+    sent = await message.answer(
         "Укажите стоимость техники в 1С (только число):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_price)
 
 
 @router.message(TechAdjustmentFSM.exchange_price)
 async def exchange_price(message: Message, state: FSMContext):
+    await track_message(state, message)
     price = message.text.strip()
     if parse_money(price) is None:
-        await message.answer("Введите корректную стоимость (только число):")
+        sent = await message.answer("Введите корректную стоимость (только число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_price=price)
     data = await state.get_data()
     if data.get("tech_adj_pulled") and data.get("exchange_purchase_date"):
-        await message.answer("Укажите номенклатуру из 1С, на что поменяли:")
+        sent = await message.answer("Укажите номенклатуру из 1С, на что поменяли:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_new_nomenclature)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_imei")]])
-    await message.answer(
+    sent = await message.answer(
         "Укажите дату покупки в формате ДД.ММ.ГГГГ:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_purchase_date)
+
+
+async def _exchange_purchase_date_confirmed(target: Message | CallbackQuery, state: FSMContext, date_str: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты покупки при обмене техники."""
+    await state.update_data(exchange_purchase_date=date_str)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_price")]])
+    answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
+    sent = await answer(
+        "Укажите номенклатуру из 1С, на что поменяли:",
+        reply_markup=with_cancel_button(kb)
+    )
+    await track_message(state, sent)
+    await state.set_state(TechAdjustmentFSM.exchange_new_nomenclature)
 
 
 @router.message(TechAdjustmentFSM.exchange_purchase_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
 async def exchange_purchase_date_valid(message: Message, state: FSMContext):
+    await track_message(state, message)
     date_text = message.text.strip()
     if not is_valid_date_ddmmyyyy(date_text):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
         return
-    await state.update_data(exchange_purchase_date=date_text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_price")]])
-    await message.answer(
-        "Укажите номенклатуру из 1С, на что поменяли:",
-        reply_markup=kb
-    )
-    await state.set_state(TechAdjustmentFSM.exchange_new_nomenclature)
+    await _exchange_purchase_date_confirmed(message, state, date_text)
 
 
 @router.message(TechAdjustmentFSM.exchange_purchase_date)
-async def exchange_purchase_date_invalid(message: Message):
-    await message.answer("Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:")
+async def exchange_purchase_date_invalid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
+    )
+    await track_message(state, sent)
 
 
 @router.message(TechAdjustmentFSM.exchange_new_nomenclature)
 async def exchange_new_nomenclature(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("Номенклатура не может быть пустой. Повторите ввод:")
+        sent = await message.answer("Номенклатура не может быть пустой. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_new_nomenclature=text)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_purchase_date")]])
     kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="exchange_new_imei_missing")])
-    await message.answer(
+    sent = await message.answer(
         "Укажите IMEI нового устройства, если он есть:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_new_imei)
 
 
@@ -575,35 +674,41 @@ async def exchange_new_imei_missing(cb: CallbackQuery, state: FSMContext):
     await state.update_data(exchange_new_imei="IMEI отсутствует")
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_purchase_date")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Укажите стоимость новой техники в 1С (только число):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_new_price)
     await cb.answer("IMEI отсутствует")
 
 
 @router.message(TechAdjustmentFSM.exchange_new_imei)
 async def exchange_new_imei(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("IMEI не может быть пустым. Повторите ввод или нажмите кнопку:")
+        sent = await message.answer("IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_new_imei=text)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_purchase_date")]])
-    await message.answer(
+    sent = await message.answer(
         "Укажите стоимость новой техники в 1С (только число):",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_new_price)
 
 
 @router.message(TechAdjustmentFSM.exchange_new_price)
 async def exchange_new_price(message: Message, state: FSMContext):
+    await track_message(state, message)
     price = message.text.strip()
     price_float = parse_money(price)
     if price_float is None:
-        await message.answer("Введите корректную стоимость (положительное число):")
+        sent = await message.answer("Введите корректную стоимость (положительное число):", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_new_price=price_float)
 
@@ -620,33 +725,37 @@ async def exchange_new_price(message: Message, state: FSMContext):
 
     if diff > 0:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
-        await message.answer(
+        sent = await message.answer(
             f"Расчет разницы:\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Необходимо принять доплату от клиента: {diff:.0f}\n\n"
             f"Выберите способ приема доплаты:",
-            reply_markup=get_diff_method_buttons()
+            reply_markup=with_cancel_button(get_diff_method_buttons())
         )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_diff_method)
     elif diff < 0:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
-        await message.answer(
+        sent = await message.answer(
             f"Расчет разницы:\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Сумма к возврату клиенту: {abs(diff):.0f}\n"
             f"Не забудьте выдать клиенту!\n\n"
             f"Выберите способ возврата:",
-            reply_markup=get_diff_method_buttons()
+            reply_markup=with_cancel_button(get_diff_method_buttons())
         )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_diff_method)
     else:
-        await message.answer(
+        kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
+        sent = await message.answer(
             f"Расчет разницы:\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Доплата не требуется (разница: 0)\n\n"
             f"Укажите дату обмена в формате ДД.ММ.ГГГГ:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.update_data(exchange_diff_method=None)
         await state.set_state(TechAdjustmentFSM.exchange_date)
 
@@ -668,41 +777,59 @@ async def exchange_diff_method(cb: CallbackQuery, state: FSMContext):
 
     await _safe_delete_message(cb)
 
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
     if diff > 0:
-        await cb.message.answer(
+        sent = await cb.message.answer(
             f"Способ приема доплаты: {method}\n\n"
             f"Укажите дату обмена в формате ДД.ММ.ГГГГ:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
+            reply_markup=with_cancel_button(back_kb)
         )
     else:
-        await cb.message.answer(
+        sent = await cb.message.answer(
             f"Способ возврата разницы: {method}\n\n"
             f"Укажите дату обмена в формате ДД.ММ.ГГГГ:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_new_nomenclature")]])
+            reply_markup=with_cancel_button(back_kb)
         )
+    await track_message(state, sent)
 
     await state.set_state(TechAdjustmentFSM.exchange_date)
     await cb.answer("Введите дату обмена")
 
 
-@router.message(TechAdjustmentFSM.exchange_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
-async def exchange_date_valid(message: Message, state: FSMContext):
-    date_text = message.text.strip()
-    if not is_valid_date_ddmmyyyy(date_text):
-        await message.answer("Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.")
-        return
-    await state.update_data(exchange_date=date_text)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_diff_method")]])
-    await message.answer(
+async def _exchange_date_confirmed(target: Message | CallbackQuery, state: FSMContext, date_str: str) -> None:
+    """Общий "хвост" после успешно подтверждённой даты обмена."""
+    await state.update_data(exchange_date=date_str)
+    answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
+    sent = await answer(
         "Укажите нахождение товара:",
-        reply_markup=get_item_location_buttons()
+        reply_markup=with_cancel_button(get_item_location_buttons())
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_location)
 
 
+@router.message(TechAdjustmentFSM.exchange_date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
+async def exchange_date_valid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    date_text = message.text.strip()
+    if not is_valid_date_ddmmyyyy(date_text):
+        sent = await message.answer(
+            "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
+            reply_markup=cancel_only_keyboard()
+        )
+        await track_message(state, sent)
+        return
+    await _exchange_date_confirmed(message, state, date_text)
+
+
 @router.message(TechAdjustmentFSM.exchange_date)
-async def exchange_date_invalid(message: Message):
-    await message.answer("Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:")
+async def exchange_date_invalid(message: Message, state: FSMContext):
+    await track_message(state, message)
+    sent = await message.answer(
+        "Неверный формат! Введите дату в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_only_keyboard()
+    )
+    await track_message(state, sent)
 
 
 @router.callback_query(F.data.startswith("loc_"), TechAdjustmentFSM.exchange_location)
@@ -718,10 +845,11 @@ async def exchange_location(cb: CallbackQuery, state: FSMContext):
     await state.update_data(exchange_location=location)
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_date")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Чек пробит и аннулирован?",
-        reply_markup=get_receipt_voided_buttons()
+        reply_markup=with_cancel_button(get_receipt_voided_buttons())
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_receipt_voided)
     await cb.answer("Выберите Да или Нет")
 
@@ -739,19 +867,22 @@ async def exchange_receipt_voided(cb: CallbackQuery, state: FSMContext):
     await state.update_data(exchange_receipt_voided=answer)
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_location")]])
-    await cb.message.answer(
+    sent = await cb.message.answer(
         "Укажите, с кем согласовано:",
-        reply_markup=kb
+        reply_markup=with_cancel_button(kb)
     )
+    await track_message(state, sent)
     await state.set_state(TechAdjustmentFSM.exchange_approver)
     await cb.answer("Введите с кем согласовано")
 
 
 @router.message(TechAdjustmentFSM.exchange_approver)
 async def exchange_approver(message: Message, state: FSMContext):
+    await track_message(state, message)
     text = message.text.strip()
     if not text:
-        await message.answer("Поле не может быть пустым. Повторите ввод:")
+        sent = await message.answer("Поле не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         return
     await state.update_data(exchange_approver=text)
 
@@ -824,7 +955,7 @@ async def exchange_approver(message: Message, state: FSMContext):
     )
 
     logger.info("Tech adjustment (exchange) claim %s created by user_id=%s", display_id, user_id)
-    await send_to_complaint_admins(message, content, internal_id, display_id)
+    await send_to_complaint_admins(message, content, internal_id, display_id, state)
     await state.clear()
 
 
@@ -880,121 +1011,141 @@ async def techadj_back_handler(cb: CallbackQuery, state: FSMContext):
         purchase_date = data.get("pulled_purchase_date", "Не указано")
         kb = get_pull_data_buttons()
         kb.inline_keyboard.insert(1, [InlineKeyboardButton(text="Назад", callback_data="techadj_back_waiting_tech_claim_number")])
-        await cb.message.answer(
+        sent = await cb.message.answer(
             "Найдена тех-заявка:\n"
             f"Название: {nomenclature}\n"
             f"IMEI: {imei}\n"
             f"Дата покупки: {purchase_date}\n\n"
             "Применить данные?",
-            reply_markup=kb
+            reply_markup=with_cancel_button(kb)
         )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.confirm_pull_data)
 
     if target_state == TechAdjustmentFSM.return_nomenclature:
-        await cb.message.answer("Укажите номенклатуру из 1С, какую технику возвращают:")
+        sent = await cb.message.answer("Укажите номенклатуру из 1С, какую технику возвращают:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_nomenclature)
     
     elif target_state == TechAdjustmentFSM.return_imei:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_nomenclature")]])
         kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="return_imei_missing")])
-        await cb.message.answer("Укажите IMEI устройства, если он есть:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите IMEI устройства, если он есть:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_imei)
     
     elif target_state == TechAdjustmentFSM.return_price:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_imei")]])
-        await cb.message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=kb)
+        sent = await cb.message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_price)
     
     elif target_state == TechAdjustmentFSM.return_purchase_date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_price")]])
-        await cb.message.answer("Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_purchase_date)
     
     elif target_state == TechAdjustmentFSM.return_refund_method:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_purchase_date")]])
-        await cb.message.answer("Выберите способ возврата:", reply_markup=get_refund_method_buttons())
+        sent = await cb.message.answer("Выберите способ возврата:", reply_markup=with_cancel_button(get_refund_method_buttons()))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_refund_method)
     
     elif target_state == TechAdjustmentFSM.return_refund_date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_refund_method")]])
-        await cb.message.answer("Укажите дату возврата в формате ДД.ММ.ГГГГ:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите дату возврата в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_refund_date)
     
     elif target_state == TechAdjustmentFSM.return_location:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_refund_date")]])
-        await cb.message.answer("Укажите нахождение товара:", reply_markup=get_item_location_buttons())
+        sent = await cb.message.answer("Укажите нахождение товара:", reply_markup=with_cancel_button(get_item_location_buttons()))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_location)
     
     elif target_state == TechAdjustmentFSM.return_receipt_voided:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("return_location")]])
-        await cb.message.answer("Чек пробит и аннулирован?", reply_markup=get_receipt_voided_buttons())
+        sent = await cb.message.answer("Чек пробит и аннулирован?", reply_markup=with_cancel_button(get_receipt_voided_buttons()))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.return_receipt_voided)
     
     # Обмен
     elif target_state == TechAdjustmentFSM.exchange_nomenclature:
-        await cb.message.answer("Укажите номенклатуру из 1С, какую технику возвращают:")
+        sent = await cb.message.answer("Укажите номенклатуру из 1С, какую технику возвращают:", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_nomenclature)
     
     elif target_state == TechAdjustmentFSM.exchange_imei:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_nomenclature")]])
         kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="exchange_imei_missing")])
-        await cb.message.answer("Укажите IMEI устройства, если он есть:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите IMEI устройства, если он есть:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_imei)
     
     elif target_state == TechAdjustmentFSM.exchange_price:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_imei")]])
-        await cb.message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=kb)
+        sent = await cb.message.answer("Укажите стоимость техники в 1С (только число):", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_price)
     
     elif target_state == TechAdjustmentFSM.exchange_purchase_date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_price")]])
-        await cb.message.answer("Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_purchase_date)
     
     elif target_state == TechAdjustmentFSM.exchange_new_nomenclature:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_purchase_date")]])
-        await cb.message.answer("Укажите номенклатуру из 1С, на что поменяли:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите номенклатуру из 1С, на что поменяли:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_new_nomenclature)
     
     elif target_state == TechAdjustmentFSM.exchange_new_imei:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_purchase_date")]])
         kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="exchange_new_imei_missing")])
-        await cb.message.answer("Укажите IMEI нового устройства, если он есть:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите IMEI нового устройства, если он есть:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_new_imei)
     
     elif target_state == TechAdjustmentFSM.exchange_new_price:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_purchase_date")]])
-        await cb.message.answer("Укажите стоимость новой техники в 1С (только число):", reply_markup=kb)
+        sent = await cb.message.answer("Укажите стоимость новой техники в 1С (только число):", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_new_price)
     
     elif target_state == TechAdjustmentFSM.exchange_diff_method:
         data = await state.get_data()
         diff = data.get('exchange_diff', 0)
         if diff > 0:
-            await cb.message.answer(
+            sent = await cb.message.answer(
                 f"Необходимо принять доплату от клиента: {diff:.0f}\n\nВыберите способ приема доплаты:",
-                reply_markup=get_diff_method_buttons()
+                reply_markup=with_cancel_button(get_diff_method_buttons())
             )
         else:
-            await cb.message.answer(
+            sent = await cb.message.answer(
                 f"Сумма к возврату клиенту: {abs(diff):.0f}\n\nВыберите способ возврата:",
-                reply_markup=get_diff_method_buttons()
+                reply_markup=with_cancel_button(get_diff_method_buttons())
             )
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_diff_method)
     
     elif target_state == TechAdjustmentFSM.exchange_date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_diff_method")]])
-        await cb.message.answer("Укажите дату обмена в формате ДД.ММ.ГГГГ:", reply_markup=kb)
+        sent = await cb.message.answer("Укажите дату обмена в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_date)
     
     elif target_state == TechAdjustmentFSM.exchange_location:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_date")]])
-        await cb.message.answer("Укажите нахождение товара:", reply_markup=get_item_location_buttons())
+        sent = await cb.message.answer("Укажите нахождение товара:", reply_markup=with_cancel_button(get_item_location_buttons()))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_location)
     
     elif target_state == TechAdjustmentFSM.exchange_receipt_voided:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech_adj("exchange_location")]])
-        await cb.message.answer("Чек пробит и аннулирован?", reply_markup=get_receipt_voided_buttons())
+        sent = await cb.message.answer("Чек пробит и аннулирован?", reply_markup=with_cancel_button(get_receipt_voided_buttons()))
+        await track_message(state, sent)
         await state.set_state(TechAdjustmentFSM.exchange_receipt_voided)
 
     await cb.answer("Вернулись на шаг назад")

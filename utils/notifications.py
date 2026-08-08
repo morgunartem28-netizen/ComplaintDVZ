@@ -83,10 +83,12 @@ async def notify_super_admins_of_decision(
         "━━━━━━━━━━━━━━━━━━━━\n",
         "📂 ", Bold("Тип:"), " ", category_label, "\n",
         "🏢 ", Bold("Точка (ТТ):"), " ", point_node, "\n",
-        "👤 ", Bold("Администратор:"), " ", admin_node, "\n",
         "📌 ", Bold("Решение:"), " ", decision, "\n",
         "🕒 ", Bold("Дата:"), " ", timestamp, "\n",
-        "💬 ", Bold("Комментарий:"), " ", (comment if comment else "—"),
+        "💬 ", Bold("Комментарий:"), " ", (comment if comment else "—"), "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        Bold("Решение принято:"), "\n",
+        "👤 ", Bold("Ответственный:"), " ", admin_node,
     )
 
     chat_kb = get_chat_button(claim_id) if claim_id else None
