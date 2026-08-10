@@ -13,7 +13,7 @@ from filters import IsSuperAdmin
 from states import SuperAdminFSM
 from utils.markdown import escape_markdown
 from utils.telegram_helpers import deny_access, build_user_mention
-from datetime import datetime
+from utils.tz import now_local, format_local
 import logging
 
 logger = logging.getLogger(__name__)
@@ -231,8 +231,9 @@ async def stats_pending(cb: CallbackQuery):
             parts = [Bold("⏳ Просроченные заявки (без ответа > 2ч):"), "\n\n"]
             for pid, display_id, uid, cat, sub, created, tg_name, client_name in pending:
                 tt_node = build_user_mention(uid, tg_name or client_name or str(uid)) if uid else "Не указано"
+                created_local = format_local(created)
                 parts.extend([
-                    f"🆔 {display_id} | ТТ: ", tt_node, f" | {cat}/{sub}\n 🕒 Создана: {created}\n\n"
+                    f"🆔 {display_id} | ТТ: ", tt_node, f" | {cat}/{sub}\n 🕒 Создана: {created_local}\n\n"
                 ])
             content = Text(*parts)
 
@@ -253,7 +254,7 @@ async def _send_stats_report(cb: CallbackQuery, days: int | None, period_label: 
         if data.startswith(b"Error:"):
             raise Exception(data.decode('utf-8'))
         
-        filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        filename = f"report_{now_local().strftime('%Y%m%d_%H%M')}.xlsx"
         caption = f"📊 Отчет сформирован ({filename})\n📅 Период: {period_label}\n✅ Формат: Excel (.xlsx)"
         
         file = BufferedInputFile(file=data, filename=filename)
@@ -269,7 +270,7 @@ async def _send_stats_report(cb: CallbackQuery, days: int | None, period_label: 
         # Если ошибка, пробуем CSV как запасной вариант
         try:
             data_csv = await export_stats_to_csv(days=days)
-            filename_csv = f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            filename_csv = f"report_{now_local().strftime('%Y%m%d_%H%M')}.csv"
             caption_csv = f"📊 Отчет сформирован ({filename_csv})\n📅 Период: {period_label}\n⚠️ Формат: CSV (из-за ошибки Excel)"
             
             file_csv = BufferedInputFile(file=data_csv, filename=filename_csv)

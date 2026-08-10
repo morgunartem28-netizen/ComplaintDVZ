@@ -61,6 +61,12 @@ class TradeinState(StatesGroup):
 class TradeinAdminFSM(StatesGroup):
     waiting_for_price = State()
 
+
+class TradeinOutcomeFSM(StatesGroup):
+    """Итог сделки со стороны ТТ после одобрения выкупа администратором.
+    waiting_for_buyout_amount — только при выборе «Сделка состоялась»."""
+    waiting_for_buyout_amount = State()
+
 # ==========================================
 # СОСТОЯНИЯ ДЛЯ COMPLAINT (ВОЗВРАТ/ОБМЕН АКСЕССУАРОВ)
 # ==========================================

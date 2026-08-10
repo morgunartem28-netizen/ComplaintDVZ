@@ -1,10 +1,13 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 def get_main_menu():
+    # «Запрос на корректировку остатков» временно скрыт из меню (бизнес-логика
+    # handlers/complaint.py, handlers/tech_adjustment.py и callback'и остаются
+    # в коде — функционал можно вернуть, снова добавив кнопку сюда).
     kb = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Техника"), KeyboardButton(text="Аксессуар")],
-            [KeyboardButton(text="Trade-in"), KeyboardButton(text="Запрос на корректировку остатков")]
+            [KeyboardButton(text="Trade-in")],
         ],
         resize_keyboard=True
     )
@@ -285,9 +288,11 @@ def get_tradein_equipment_buttons():
 
 def get_tradein_outcome_buttons(claim_id: int):
     """Кнопки решения ТТ по итогу сделки — показываются автору заявки ПОСЛЕ того,
-    как администратор одобрил сумму выкупа (см. handlers/tradein.py)."""
+    как администратор одобрил сумму выкупа (см. handlers/tradein.py).
+    «Сделка состоялась» → запрос фактической суммы выкупа; затем финальное
+    уведомление «Устройство принято». «Сделка не состоялась» — без суммы."""
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Устройство принято", callback_data=f"tradein_outcome_accepted_{claim_id}")],
+        [InlineKeyboardButton(text="✅ Сделка состоялась", callback_data=f"tradein_outcome_accepted_{claim_id}")],
         [InlineKeyboardButton(text="❌ Сделка не состоялась", callback_data=f"tradein_outcome_cancelled_{claim_id}")]
     ])
     return kb
@@ -349,51 +354,3 @@ def get_chat_cancel_keyboard(claim_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отменить", callback_data=f"chat_cancel_{claim_id}")]
     ])
-
-# ==========================================
-# КЛАВИАТУРА ДЛЯ ТАЙМЕРА ОТСУТСТВИЯ ОТВЕТА (5/10/15 МИН)
-# ==========================================
-
-TAKE_INTO_WORK_PREFIX = "claim_take_"
-
-
-def append_take_into_work_row(kb: InlineKeyboardMarkup, claim_id: int) -> InlineKeyboardMarkup:
-    """Добавляет строку с кнопкой "Взять в работу" в уже существующую клавиатуру
-    решения администратора — чтобы её можно было нажать сразу, с момента
-    получения самой первой карточки заявки, а не только после срабатывания
-    напоминания о просрочке (см. utils/claim_timer_service.py)."""
-    kb.inline_keyboard.append(
-        [InlineKeyboardButton(text="🕐 Взять в работу", callback_data=f"{TAKE_INTO_WORK_PREFIX}{claim_id}")]
-    )
-    return kb
-
-
-def get_take_into_work_button(claim_id: int) -> InlineKeyboardMarkup:
-    """Одна кнопка "Взять в работу", прикрепляемая ОТДЕЛЬНЫМ сообщением к
-    напоминанию/уведомлению о просроченной заявке (см. handlers/claim_timer.py,
-    utils/claim_timer_service.py) — не встраивается в существующие карточки
-    решения заявки в других модулях, чтобы не создавать конфликтов правок."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🕐 Взять в работу", callback_data=f"{TAKE_INTO_WORK_PREFIX}{claim_id}")]
-    ])
-
-
-def strip_take_into_work_row(kb: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
-    """Убирает из клавиатуры ТОЛЬКО строку с кнопкой "Взять в работу", сохраняя
-    остальные ряды (Одобрить/Отклонить/Чат заявки) как есть.
-
-    Кнопка "Взять в работу" почти всегда — это ДОПОЛНИТЕЛЬНАЯ строка на той же
-    карточке решения (см. append_take_into_work_row выше), а не отдельное
-    сообщение. Полная очистка reply_markup стирала бы вместе с ней и кнопки
-    решения — админ терял бы возможность одобрить/отклонить заявку сразу
-    после того, как взял её в работу. Используется как при клике по самой
-    кнопке (handlers/claim_timer.py), так и заранее — чтобы заготовить
-    "версию после взятия в работу" для остальных копий карточки/напоминания
-    (см. utils/telegram_helpers.register_take_into_work_card)."""
-    if not kb or not kb.inline_keyboard:
-        return None
-    remaining_rows = [
-        row for row in kb.inline_keyboard
-        if not any((btn.callback_data or "").startswith(TAKE_INTO_WORK_PREFIX) for btn in row)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=remaining_rows) if remaining_rows else None

@@ -5,53 +5,72 @@ from aiogram.utils.formatting import Text, Bold
 from database import (
     create_claim, get_admins_by_role, get_claim, add_claim_history, log_action, try_update_claim_status,
     add_chat_system_message, get_chat_messages, get_claim_responsible_admin_info,
+    set_claim_buyout_amount,
 )
 from keyboards import (
     get_tradein_admin_decision, get_main_menu, get_tradein_sim_buttons, get_tradein_condition_buttons,
     get_tradein_screen_condition_buttons, get_tradein_body_condition_buttons,
     get_tradein_repair_choice_buttons, get_tradein_payment_buttons, get_tradein_competitor_offer_buttons,
     get_tradein_equipment_buttons, get_tradein_outcome_buttons,
-    append_chat_button_row, get_chat_button, append_take_into_work_row, strip_take_into_work_row
+    append_chat_button_row, get_chat_button,
 )
-from states import TradeinState, TradeinAdminFSM
+from states import TradeinState, TradeinAdminFSM, TradeinOutcomeFSM
 from bot_instance import bot
 from filters import IsTradeinAdmin
 import asyncio
 import logging
 import os
 import time
-from utils.validation import is_valid_date_ddmmyyyy
+from utils.validation import (
+    is_valid_date_ddmmyyyy, is_future_date_ddmmyyyy, FUTURE_PURCHASE_DATE_TEXT,
+    parse_money, format_money_rub,
+)
 from utils.markdown import escape_markdown
 from utils.telegram_helpers import (
     get_telegram_name, safe_delete_message, build_user_mention, deny_access,
     with_cancel_button, cancel_only_keyboard, track_message, cleanup_tracked_messages,
-    register_take_into_work_card,
+    track_prompt_after_cleanup,
 )
 from utils.notifications import notify_super_admins_of_decision
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-DKP_LINK = "https://example.com/dkp"
 MEDIA_GROUP_TTL_SECONDS = 120
 
-# Памятка по продаже с Trade-in — прикладывается сотруднику ТТ сразу после
-# одобрения заявки (см. _send_tradein_approval_reminder). Директория считается
-# от корня проекта, чтобы не зависеть от текущей рабочей директории запуска.
-# Имя файла ищем динамически (а не хардкодим строкой) — кириллическое имя на
-# диске может быть в NFD-нормализации (например "и" + U+0306), которая не
-# совпадает побайтово с обычным строковым литералом в исходнике.
+# Файлы Trade-in (памятка, договор) — в assets/. Имена ищем динамически:
+# кириллица на диске может быть в NFD-нормализации и не совпасть с литералом.
 TRADEIN_ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets")
 
 
-def _find_tradein_memo_path() -> str | None:
+def _find_asset_by_keywords(extensions: tuple[str, ...], *keyword_groups: tuple[str, ...]) -> str | None:
+    """Ищет файл в TRADEIN_ASSETS_DIR: расширение из extensions и все слова
+    хотя бы одной группы keyword_groups встречаются в lower(name)."""
     try:
-        for name in os.listdir(TRADEIN_ASSETS_DIR):
-            if name.lower().endswith(".pdf") and "trade" in name.lower():
-                return os.path.join(TRADEIN_ASSETS_DIR, name)
+        names = os.listdir(TRADEIN_ASSETS_DIR)
     except OSError:
-        pass
+        return None
+    for name in names:
+        lower = name.lower()
+        if not any(lower.endswith(ext) for ext in extensions):
+            continue
+        for keywords in keyword_groups:
+            if all(k in lower for k in keywords):
+                return os.path.join(TRADEIN_ASSETS_DIR, name)
     return None
+
+
+def _find_tradein_memo_path() -> str | None:
+    return _find_asset_by_keywords((".pdf",), ("trade",))
+
+
+def _find_tradein_contract_path() -> str | None:
+    """Договор купли-продажи Trade-in (docx/pdf)."""
+    return _find_asset_by_keywords(
+        (".docx", ".doc", ".pdf"),
+        ("договор", "купли"),
+        ("dogovor", "kupli"),
+    )
 
 _safe_delete_message = safe_delete_message
 
@@ -205,7 +224,7 @@ async def tradein_back_handler(cb: CallbackQuery, state: FSMContext):
     else:
         sent = await cb.message.answer(prompt_text, reply_markup=cancel_only_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
 
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(target_state)
     await cb.answer("Вернулись на шаг назад")
 
@@ -228,7 +247,7 @@ async def tradein_model_received(message: Message, state: FSMContext):
         "📱 Выберите тип SIM:",
         reply_markup=with_cancel_button(get_tradein_sim_buttons())
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.sim)
 
 
@@ -258,7 +277,7 @@ async def tradein_sim_selected(cb: CallbackQuery, state: FSMContext):
         "💾 Укажите память устройства:",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.memory)
     await cb.answer(f"Выбрано: {sim}")
 
@@ -277,7 +296,7 @@ async def tradein_memory_received(message: Message, state: FSMContext):
         "🔍 Выберите состояние устройства:",
         reply_markup=with_cancel_button(get_tradein_condition_buttons())
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.condition)
 
 
@@ -324,7 +343,7 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
             "📱 Выберите состояние экрана:",
             reply_markup=with_cancel_button(kb)
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TradeinState.screen_condition)
         await cb.answer(f"Выбрано: {condition}")
         return
@@ -337,7 +356,7 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
         "🔋 Укажите какой % у аккумулятора:",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.battery)
     await cb.answer(f"Выбрано: {condition}")
 
@@ -368,7 +387,7 @@ async def tradein_screen_condition_selected(cb: CallbackQuery, state: FSMContext
         "📦 Выберите состояние корпуса:",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.body_condition)
     await cb.answer(f"Выбрано: {screen_condition}")
 
@@ -398,7 +417,7 @@ async def tradein_body_condition_selected(cb: CallbackQuery, state: FSMContext):
         "🔋 Укажите какой % у аккумулятора:",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.battery)
     await cb.answer(f"Выбрано: {body_condition}")
 
@@ -419,7 +438,7 @@ async def tradein_battery_received(message: Message, state: FSMContext):
         "🔧 Были ли ремонты устройства?",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.repair_choice)
 
 
@@ -438,7 +457,7 @@ async def tradein_repair_choice_selected(cb: CallbackQuery, state: FSMContext):
             "📦 Укажите комплектацию сдаваемого устройства:",
             reply_markup=with_cancel_button(kb)
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TradeinState.equipment)
         await cb.answer("Без ремонтов")
     elif cb.data == "tradein_repair_specify":
@@ -448,7 +467,7 @@ async def tradein_repair_choice_selected(cb: CallbackQuery, state: FSMContext):
             "🔧 Укажите, что ремонтировалось (например: замена дисплея, замена аккумулятора, после воды):",
             reply_markup=kb
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TradeinState.repair)
         await cb.answer("Укажите ремонты")
     else:
@@ -471,7 +490,7 @@ async def tradein_repair_received(message: Message, state: FSMContext):
         "📦 Укажите комплектацию сдаваемого устройства:",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.equipment)
 
 
@@ -504,7 +523,7 @@ async def tradein_equipment_selected(cb: CallbackQuery, state: FSMContext):
         parse_mode="Markdown",
         disable_web_page_preview=True
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.activation_date)
     await cb.answer(f"Выбрано: {equipment}")
 
@@ -518,7 +537,7 @@ async def _tradein_activation_confirmed(target: Message | CallbackQuery, state: 
         "🎯 Укажите какую модель планируют брать:",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.target_model)
 
 
@@ -531,6 +550,10 @@ async def tradein_activation_valid(message: Message, state: FSMContext):
             "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
             reply_markup=cancel_only_keyboard()
         )
+        await track_message(state, sent)
+        return
+    if is_future_date_ddmmyyyy(activation):
+        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=cancel_only_keyboard())
         await track_message(state, sent)
         return
     await _tradein_activation_confirmed(message, state, activation)
@@ -564,7 +587,7 @@ async def tradein_target_model_received(message: Message, state: FSMContext):
         "💳 Выберите форму оплаты:",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.payment_method)
 
 
@@ -594,7 +617,7 @@ async def tradein_payment_selected(cb: CallbackQuery, state: FSMContext):
         "Если устройство ранее нигде не оценивалось, нажмите «Не оценивали».",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.competitor_offer)
     await cb.answer(f"Выбрано: {payment_method}")
 
@@ -612,7 +635,7 @@ async def tradein_competitor_offer_none(cb: CallbackQuery, state: FSMContext):
         "👤 Введите ФИО сотрудника, принимающего устройство:",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.receiver_name)
     await cb.answer("Не оценивали")
 
@@ -635,7 +658,7 @@ async def tradein_competitor_offer_received(message: Message, state: FSMContext)
         "👤 Введите ФИО сотрудника, принимающего устройство:",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.receiver_name)
 
 
@@ -660,7 +683,7 @@ async def tradein_receiver_name_received(message: Message, state: FSMContext):
         "защитное стекло/плёнку с экрана!",
         reply_markup=kb
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.photos)
 
 
@@ -859,6 +882,16 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
     receiver_name = data['receiver_name']
     photos = data['tradein_photos']
 
+    # Второй уровень защиты от будущей даты активации (см. tradein_activation_valid) —
+    # activation_date попадает в claims.purchase_date, поэтому проверяется тем же
+    # правилом "дата покупки не в будущем".
+    if is_future_date_ddmmyyyy(activation_date):
+        await cleanup_tracked_messages(message.bot, state)
+        await message.answer(f"❌ {FUTURE_PURCHASE_DATE_TEXT} Начните заново.")
+        logger.warning("Blocked tradein claim creation with future activation_date=%s user_id=%s", activation_date, user.id)
+        await state.clear()
+        return
+
     photos_str = "|".join(photos)
 
     # Детали экрана/корпуса — только для «Следы эксплуатации»
@@ -957,7 +990,6 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
 
     keyboard = get_tradein_admin_decision(internal_id)
     append_chat_button_row(keyboard, internal_id)
-    append_take_into_work_row(keyboard, internal_id)
 
     target_admins = await get_admins_by_role('admin_tradein')
     if not target_admins:
@@ -973,7 +1005,6 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
         return
 
     media_list = [InputMediaPhoto(media=photo_id) for photo_id in photos]
-    markup_after_take = strip_take_into_work_row(keyboard)
 
     # Отправляем админам с обработкой ошибок
     notified = 0
@@ -982,12 +1013,11 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
             try:
                 if media_list:
                     await bot.send_media_group(chat_id=admin_id, media=media_list)
-                sent = await bot.send_message(
+                await bot.send_message(
                     chat_id=admin_id,
                     reply_markup=keyboard,
                     **content.as_kwargs()
                 )
-                register_take_into_work_card(internal_id, sent.chat.id, sent.message_id, markup_after_take)
                 notified += 1
                 break  # Успешно отправлено
             except Exception as e:
@@ -1168,9 +1198,10 @@ async def tradein_admin_approve_finish(message: Message, state: FSMContext):
             "✅ ", Bold("Заявка одобрена!"), "\n\n",
             "💰 ", Bold("Стоимость выкупа:"), " ", price, "\n",
             "👨‍💼 ", Bold("Ответственный:"), " ", build_user_mention(admin_id, admin_name), "\n\n",
-            "📎 ", Bold("Требуется подписать договор:"), " ", DKP_LINK, "\n\n",
-            "Когда сделка будет завершена (устройство принято или клиент отказался), ",
-            "отметьте итог кнопкой ниже:",
+            "📎 ", Bold("Требуется подписать договор купли-продажи Trade-in"), "\n",
+            "Файл договора и инструкция по заполнению — в следующих сообщениях.\n\n",
+            "Когда сделка будет завершена, отметьте итог кнопкой ниже "
+            "(«Сделка состоялась» или «Сделка не состоялась»):",
         )
         outcome_kb = get_tradein_outcome_buttons(claim_id)
         append_chat_button_row(outcome_kb, claim_id)
@@ -1183,12 +1214,41 @@ async def tradein_admin_approve_finish(message: Message, state: FSMContext):
         logger.error("Failed to notify tradein approval to user: %s", e)
 
     if user_id:
+        await _send_tradein_contract_package(user_id)
         await _send_tradein_approval_reminder(user_id, display_id)
 
     await notify_super_admins_of_decision(
         claim, admin_id, admin_name, "Одобрено", decision_comment
     )
     logger.info("Tradein claim %s approved by admin_id=%s price=%s", display_id, admin_id, price)
+
+
+async def _send_tradein_contract_package(user_id: int) -> None:
+    """Договор купли-продажи + инструкция по заполнению — сразу после одобрения."""
+    contract_path = _find_tradein_contract_path()
+    if contract_path:
+        try:
+            await bot.send_document(
+                user_id,
+                document=FSInputFile(contract_path),
+                caption="📄 Договор купли-продажи Trade-in",
+            )
+        except Exception as exc:
+            logger.error("Failed to send tradein contract file to user %s: %s", user_id, exc)
+    else:
+        logger.warning("Tradein contract file not found in %s", TRADEIN_ASSETS_DIR)
+
+    instructions = Text(
+        Bold("Договор купли продажи Трейд-ин"), "\n\n",
+        "1. Заполняете данные продавца: ФИО, паспортные данные, адрес, номер телефона\n",
+        "2. Заполняете п.1: модель телефона, комплектация, имей\n",
+        "3. Заполняете п.7: выкупная стоимость\n",
+        "4. Реквизиты Покупателя: заполняете данные вашей торговой точки ИП или ООО к которой относитесь.",
+    )
+    try:
+        await bot.send_message(user_id, **instructions.as_kwargs())
+    except Exception as exc:
+        logger.error("Failed to send tradein contract instructions to user %s: %s", user_id, exc)
 
 
 async def _send_tradein_approval_reminder(user_id: int, display_id: str) -> None:
@@ -1222,17 +1282,35 @@ async def _send_tradein_approval_reminder(user_id: int, display_id: str) -> None
 # ==========================================
 # После одобрения суммы выкупа статус заявки уже 'approved' (это финальное
 # админское решение — try_update_claim_status переводит его из 'pending' один раз
-# и повторно эту атомарность мы не трогаем). "Устройство принято"/"Сделка не
+# и повторно эту атомарность мы не трогаем). "Сделка состоялась"/"Сделка не
 # состоялась" — это ВТОРИЧНЫЙ итог, который фиксирует сам ТТ уже постфактум,
 # поэтому мы намеренно НЕ меняем claims.status и НЕ пишем строку в claim_history
 # (там admin_id должен быть ID администратора, принявшего РЕШЕНИЕ по заявке —
 # get_claim_responsible_admin_id/get_claim_chat_participants читают именно
 # последнюю запись claim_history для вычисления "ответственного админа" чата;
 # запись туда ID сотрудника ТТ вместо админа сломала бы эту логику).
-# Минимально инвазивный способ зафиксировать событие — системная запись в чат
-# заявки (add_chat_system_message, без правок database.py/схемы) + прямое
-# уведомление админам и супер-админам.
+# При «Сделка состоялась» дополнительно запрашиваем фактическую сумму выкупа
+# (claims.buyout_amount), затем шлём финальное уведомление «Устройство принято».
 _TRADEIN_OUTCOME_MARKER = "Итог Trade-in:"
+BUYOUT_AMOUNT_PROMPT = "Укажите сумму, за которую выкупили устройство."
+BUYOUT_AMOUNT_INVALID = "Введите корректную сумму выкупа."
+
+
+def _parse_tradein_outcome_claim_id(cb_data: str) -> int | None:
+    try:
+        return int(cb_data.split("_")[-1])
+    except (ValueError, IndexError, AttributeError):
+        return None
+
+
+def _parse_positive_buyout_amount(raw: str) -> int | None:
+    """Целое число > 0; допускает пробелы тысяч («50 000»). Не float/текст/0/отриц."""
+    amount = parse_money(raw)
+    if amount is None or amount <= 0:
+        return None
+    if amount != int(amount):
+        return None
+    return int(amount)
 
 
 async def _tradein_outcome_already_recorded(claim_id: int) -> bool:
@@ -1248,121 +1326,230 @@ async def _tradein_outcome_already_recorded(claim_id: int) -> bool:
     )
 
 
-async def _tradein_finalize_outcome(cb: CallbackQuery, accepted: bool):
-    try:
-        claim_id = int(cb.data.split("_")[-1])
-    except (ValueError, IndexError):
-        await cb.answer("Ошибка данных", show_alert=True)
-        return
-
+async def _load_tradein_outcome_claim_for_actor(claim_id: int, actor_id: int):
+    """Общие проверки доступа ТТ к итогу сделки. Возвращает claim либо (None, alert)."""
     claim = await get_claim(claim_id)
     if not claim:
-        await cb.answer("Заявка не найдена", show_alert=True)
-        return
-
-    if claim.get('user_id') != cb.from_user.id:
-        await cb.answer("⛔ Недостаточно прав для этого действия.", show_alert=True)
-        return
-
+        return None, "Заявка не найдена"
+    if claim.get('user_id') != actor_id:
+        return None, "⛔ Недостаточно прав для этого действия."
     if await _tradein_outcome_already_recorded(claim_id):
-        await cb.answer("Итог по этой заявке уже зафиксирован", show_alert=True)
-        return
+        return None, "Итог по этой заявке уже зафиксирован"
+    return claim, None
 
-    display_id = claim.get('display_id', f'#{claim_id}')
-    full_name = cb.from_user.full_name or "ТТ"
+
+async def _tradein_finalize_outcome(
+    *,
+    claim: dict,
+    actor_id: int,
+    actor_name: str,
+    accepted: bool,
+    buyout_amount: int | None = None,
+    cb: CallbackQuery | None = None,
+):
+    """Фиксирует итог сделки и шлёт уведомления админам/супер-админам.
+
+    Ответственный — из claim_history (кто принял решение по заявке), не actor_id
+    (ТТ, который отметил итог / ввёл сумму). ТТ отдельное «спасибо» не получает —
+    подтверждение для админов и есть финальное уведомление с суммой выкупа.
+    """
+    claim_id = claim['id']
+    # Перечитываем заявку после возможного set_claim_buyout_amount
+    fresh = await get_claim(claim_id) or claim
+    display_id = fresh.get('display_id', f'#{claim_id}')
     outcome_label = "✅ Устройство принято" if accepted else "❌ Сделка не состоялась"
+    amount_for_log = buyout_amount if buyout_amount is not None else fresh.get('buyout_amount')
 
+    system_text = f"{_TRADEIN_OUTCOME_MARKER} {outcome_label} (ТТ: {actor_name})"
+    if accepted and amount_for_log is not None:
+        system_text += f", сумма выкупа: {format_money_rub(amount_for_log)}"
     try:
-        await add_chat_system_message(claim_id, f"{_TRADEIN_OUTCOME_MARKER} {outcome_label} (ТТ: {full_name})")
+        await add_chat_system_message(claim_id, system_text)
     except Exception as exc:
         logger.warning("Failed to record tradein outcome to claim chat %s: %s", claim_id, exc)
 
     try:
         await log_action(
-            cb.from_user.id,
+            actor_id,
             'tradein_device_accepted' if accepted else 'tradein_deal_cancelled',
             claim_id,
         )
     except Exception as exc:
-        # log_action пишет только в служебный журнал logs — сбой здесь не должен
-        # прерывать доставку уведомления администратору (основная цель хендлера).
         logger.warning("Failed to write log_action for tradein outcome on claim %s: %s", claim_id, exc)
 
-    # Убираем кнопки итога, оставляя только вход в чат — исключает повторное нажатие.
-    try:
-        await cb.message.edit_reply_markup(reply_markup=get_chat_button(claim_id))
-    except Exception:
-        pass
+    # Убираем кнопки итога у исходного сообщения с одобрением (если ещё есть).
+    if cb and cb.message:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=get_chat_button(claim_id))
+        except Exception:
+            pass
 
-    # Уведомляем ответственного администратора Trade-in, всех админов роли
-    # admin_tradein (запасной канал — на случай, если по заявке ещё нет
-    # ответственного или он не резолвится) и супер-админов простым сообщением
-    # (не через notify_super_admins_of_decision — это не новое "решение
-    # администратора" по заявке, а ответ ТТ, повторный вызов только задвоил бы
-    # системную запись/лишний раз выставил бы chat_locked, который уже True).
     responsible_admin_id, responsible_admin_name = (None, None)
     try:
         responsible_admin_id, responsible_admin_name = await get_claim_responsible_admin_info(claim_id)
     except Exception as exc:
         logger.warning("Failed to resolve responsible admin for tradein claim %s: %s", claim_id, exc)
 
+    # Получатели итога сделки — только ответственный по заявке и все супер-админы.
+    # Обычных admin_tradein сюда не включаем (по требованию).
+    # НЕ исключаем actor_id: если ТТ одновременно супер-админ / ответственный,
+    # он тоже должен увидеть уведомление с суммой выкупа.
     recipients = set()
     if responsible_admin_id:
         recipients.add(responsible_admin_id)
     try:
-        recipients.update(await get_admins_by_role('admin_tradein'))
-    except Exception as exc:
-        logger.warning("Failed to load admin_tradein role for tradein outcome notice: %s", exc)
-    try:
         recipients.update(await get_admins_by_role('super_admin'))
     except Exception as exc:
         logger.warning("Failed to load super admins for tradein outcome notice: %s", exc)
-    recipients.discard(cb.from_user.id)
 
-    device_model = claim.get('brand') or "Не указано"
+    tt_name = fresh.get('tg_name') or fresh.get('client_name') or actor_name
+    tt_user_id = fresh.get('user_id') or actor_id
+    device_model = fresh.get('brand') or "Не указано"
     content_parts = [
         Bold(outcome_label), "\n",
         "━━━━━━━━━━━━━━━━━━━━\n",
-        "🔢 ", Bold("№ заявки:"), " ", display_id, "\n",
+        "🔢 ", Bold("Номер заявки:"), " ", display_id, "\n",
         "📱 ", Bold("Устройство:"), " ", device_model, "\n",
-        "🏢 ", Bold("ТТ:"), " ", build_user_mention(cb.from_user.id, full_name), "\n",
     ]
+    if accepted:
+        if amount_for_log is not None:
+            content_parts.extend([
+                "💰 ", Bold("Сумма выкупа:"), " ", format_money_rub(amount_for_log), "\n",
+            ])
+        else:
+            content_parts.extend([
+                "💰 ", Bold("Сумма выкупа:"), " ", "не указана", "\n",
+            ])
+    content_parts.extend([
+        "🏢 ", Bold("ТТ:"), " ", build_user_mention(tt_user_id, tt_name), "\n",
+    ])
     if responsible_admin_id:
         content_parts.extend([
-            "👤 ", Bold("Ответственный:"), " ", build_user_mention(responsible_admin_id, responsible_admin_name or "Администратор"), "\n",
+            "👤 ", Bold("Ответственный:"), " ",
+            build_user_mention(responsible_admin_id, responsible_admin_name or "Администратор"), "\n",
         ])
     content = Text(*content_parts)
 
     if not recipients:
         logger.warning(
             "Tradein outcome for claim %s has no notification recipients "
-            "(no responsible admin / admin_tradein / super_admin found besides the actor)",
+            "(no responsible admin / super_admin found)",
             display_id,
         )
+    notified_ok = []
     for recipient_id in recipients:
         try:
             await bot.send_message(recipient_id, reply_markup=get_chat_button(claim_id), **content.as_kwargs())
+            notified_ok.append(recipient_id)
         except Exception:
             logger.exception(
                 "Failed to notify %s about tradein outcome for claim %s",
                 recipient_id, display_id,
             )
 
-    await cb.answer("Спасибо, итог зафиксирован" if accepted else "Итог зафиксирован: сделка не состоялась")
+    if cb is not None:
+        await cb.answer(
+            "Итог зафиксирован" if accepted else "Итог зафиксирован: сделка не состоялась"
+        )
+
     logger.info(
-        "Tradein claim %s final outcome recorded: accepted=%s by user_id=%s, notified=%s",
-        display_id, accepted, cb.from_user.id, sorted(recipients)
+        "Tradein claim %s final outcome recorded: accepted=%s buyout_amount=%s by user_id=%s, "
+        "recipients=%s notified_ok=%s",
+        display_id, accepted, amount_for_log, actor_id, sorted(recipients), notified_ok,
     )
 
 
 @router.callback_query(F.data.startswith("tradein_outcome_accepted_"))
-async def tradein_outcome_accepted(cb: CallbackQuery):
-    await _tradein_finalize_outcome(cb, accepted=True)
+async def tradein_outcome_accepted(cb: CallbackQuery, state: FSMContext):
+    """«Сделка состоялась» — не завершаем сразу, запрашиваем фактическую сумму выкупа."""
+    claim_id = _parse_tradein_outcome_claim_id(cb.data)
+    if claim_id is None:
+        await cb.answer("Ошибка данных", show_alert=True)
+        return
+
+    claim, alert = await _load_tradein_outcome_claim_for_actor(claim_id, cb.from_user.id)
+    if alert:
+        await cb.answer(alert, show_alert=True)
+        return
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=get_chat_button(claim_id))
+    except Exception:
+        pass
+
+    await state.set_state(TradeinOutcomeFSM.waiting_for_buyout_amount)
+    await state.update_data(tradein_outcome_claim_id=claim_id)
+    sent = await cb.message.answer(BUYOUT_AMOUNT_PROMPT, reply_markup=cancel_only_keyboard())
+    await track_message(state, sent)
+    await cb.answer()
+
+
+@router.message(TradeinOutcomeFSM.waiting_for_buyout_amount)
+async def tradein_outcome_buyout_amount(message: Message, state: FSMContext):
+    await track_message(state, message)
+    data = await state.get_data()
+    claim_id = data.get('tradein_outcome_claim_id')
+    if not claim_id:
+        await cleanup_tracked_messages(message.bot, state)
+        await message.answer("❌ Сессия истекла. Откройте уведомление об одобрении и отметьте итог заново.")
+        await state.clear()
+        return
+
+    amount = _parse_positive_buyout_amount(message.text or "")
+    if amount is None:
+        sent = await message.answer(BUYOUT_AMOUNT_INVALID, reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
+        return
+
+    claim, alert = await _load_tradein_outcome_claim_for_actor(claim_id, message.from_user.id)
+    if alert:
+        await cleanup_tracked_messages(message.bot, state)
+        await message.answer(alert)
+        await state.clear()
+        return
+
+    try:
+        await set_claim_buyout_amount(claim_id, amount)
+    except Exception as exc:
+        logger.error("Failed to save buyout_amount=%s for claim %s: %s", amount, claim_id, exc)
+        sent = await message.answer("❌ Не удалось сохранить сумму. Попробуйте ещё раз.", reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
+        return
+
+    await cleanup_tracked_messages(message.bot, state)
+    await state.clear()
+    await _tradein_finalize_outcome(
+        claim=claim,
+        actor_id=message.from_user.id,
+        actor_name=message.from_user.full_name or "ТТ",
+        accepted=True,
+        buyout_amount=amount,
+    )
 
 
 @router.callback_query(F.data.startswith("tradein_outcome_cancelled_"))
-async def tradein_outcome_cancelled(cb: CallbackQuery):
-    await _tradein_finalize_outcome(cb, accepted=False)
+async def tradein_outcome_cancelled(cb: CallbackQuery, state: FSMContext):
+    """«Сделка не состоялась» — сумму выкупа не запрашиваем."""
+    claim_id = _parse_tradein_outcome_claim_id(cb.data)
+    if claim_id is None:
+        await cb.answer("Ошибка данных", show_alert=True)
+        return
+
+    claim, alert = await _load_tradein_outcome_claim_for_actor(claim_id, cb.from_user.id)
+    if alert:
+        await cb.answer(alert, show_alert=True)
+        return
+
+    # Если ТТ был на шаге ввода суммы по другой заявке — сбрасываем FSM.
+    await state.clear()
+    await _tradein_finalize_outcome(
+        claim=claim,
+        actor_id=cb.from_user.id,
+        actor_name=cb.from_user.full_name or "ТТ",
+        accepted=False,
+        buyout_amount=None,
+        cb=cb,
+    )
 
 
 # Fallback: если IsTradeinAdmin не пропустил решение (например, у отправителя

@@ -12,7 +12,6 @@ callback_data используется только как адрес ("каку
 подмены claim_id в callback_data.
 """
 import logging
-from datetime import datetime
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message, InputMediaPhoto
@@ -34,6 +33,7 @@ from keyboards import get_chat_history_keyboard, get_chat_cancel_keyboard
 from states import ChatFSM
 from utils.telegram_helpers import deny_access, get_telegram_name, safe_delete_message, build_user_mention
 from utils.claim_timer_service import stop_claim_timer_if_needed
+from utils.tz import format_local
 from utils.chat_notifications import notify_new_chat_message
 
 router = Router()
@@ -57,14 +57,10 @@ def _parse_claim_id(cb_data: str, prefix: str):
 
 
 def _format_ts(raw_ts: str) -> str:
-    if not raw_ts:
-        return ""
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
-        try:
-            return datetime.strptime(raw_ts, fmt).strftime("%d.%m.%Y %H:%M")
-        except ValueError:
-            continue
-    return raw_ts
+    """Метка времени сообщения чата, показанная в Asia/Yekaterinburg — в БД
+    (chat_messages.timestamp = CURRENT_TIMESTAMP) она хранится в UTC, конвертация
+    только для отображения (см. utils.tz)."""
+    return format_local(raw_ts)
 
 
 async def _resolve_author_label(claim: dict) -> str:

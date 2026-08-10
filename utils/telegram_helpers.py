@@ -124,11 +124,12 @@ async def track_message(state: FSMContext, message: Message) -> None:
     """Запоминает сообщение (бота или пользователя) в FSM data как "промежуточное" —
     то есть относящееся к одному из вопросов сценария, а не к его финальному итогу.
 
-    Все накопленные так сообщения удаляются одним вызовом cleanup_tracked_messages
-    в момент, когда сценарий доходит до финальной карточки заявки — в истории чата
-    остаётся только сама заявка (и позже — решение администратора), а не пошаговая
-    переписка "бот спросил — пользователь ответил".
+    Удаляются либо при переходе на следующий шаг (track_prompt_after_cleanup),
+    либо финальным cleanup_tracked_messages при завершении/отмене сценария —
+    в истории чата остаётся итоговая заявка, а не вся пошаговая переписка.
     """
+    if message is None:
+        return
     data = await state.get_data()
     tracked = list(data.get(_CLEANUP_DATA_KEY, []))
     tracked.append((message.chat.id, message.message_id))
@@ -152,41 +153,13 @@ async def cleanup_tracked_messages(bot, state: FSMContext) -> None:
         await state.update_data(**{_CLEANUP_DATA_KEY: []})
 
 
-# ==========================================
-# РЕЕСТР КОПИЙ КНОПКИ "ВЗЯТЬ В РАБОТУ" (для конкретной заявки)
-# ==========================================
+async def track_prompt_after_cleanup(bot, state: FSMContext, prompt: Message) -> None:
+    """Успешный переход на следующий шаг сценария: удалить прошлые вопросы/ответы,
+    затем поставить на учёт только новый вопрос бота.
 
-# claim_id -> [(chat_id, message_id, markup_после_взятия_в_работу), ...]
-_take_into_work_locations: dict[int, list[tuple[int, int, InlineKeyboardMarkup | None]]] = {}
-
-
-def register_take_into_work_card(
-    claim_id: int,
-    chat_id: int,
-    message_id: int,
-    markup_after_take: InlineKeyboardMarkup | None,
-) -> None:
-    """Запоминает место (chat_id, message_id), где показана кнопка "Взять в
-    работу" по заявке claim_id — карточка решения у конкретного админа или
-    отдельное сообщение-напоминание (utils/claim_timer_service.py).
-
-    `markup_after_take` — уже готовая клавиатура БЕЗ строки "Взять в работу"
-    (см. keyboards.strip_take_into_work_row), которую нужно поставить на это
-    сообщение, когда заявку возьмёт в работу ЛЮБОЙ администратор (в том числе
-    не тот, кому адресована именно эта копия карточки). Без этого у остальных
-    админов/на повторных напоминаниях кнопка осталась бы "залипшей": по ней
-    можно нажать, но толку не будет ("уже взято другим").
-
-    Хранится только в памяти процесса — при перезапуске бота реестр пуст, и
-    старые карточки просто перестают самоочищаться (в остальном они и раньше
-    работали именно так, до появления этого реестра). Источник истины остаётся
-    в БД (claims.taken_at/taken_by) — реестр только помогает подчистить UI.
+    Важно вызывать ПОСЛЕ отправки `prompt` и ПОСЛЕ track_message(user_answer),
+    но НЕ использовать на сообщениях об ошибке валидации — иначе сотрётся
+    исходный вопрос шага.
     """
-    _take_into_work_locations.setdefault(claim_id, []).append((chat_id, message_id, markup_after_take))
-
-
-def pop_take_into_work_locations(claim_id: int) -> list[tuple[int, int, InlineKeyboardMarkup | None]]:
-    """Забирает и удаляет из реестра все места показа кнопки "Взять в работу"
-    по заявке — вызывается ровно один раз, сразу после того, как заявка
-    успешно взята в работу (claim_take_into_work)."""
-    return _take_into_work_locations.pop(claim_id, [])
+    await cleanup_tracked_messages(bot, state)
+    await track_message(state, prompt)

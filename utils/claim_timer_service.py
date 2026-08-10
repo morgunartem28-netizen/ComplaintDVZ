@@ -1,23 +1,10 @@
 """Фоновый сервис таймера отсутствия ответа на заявку (5/10/15 минут).
 
-Реализован ПОЛНОСТЬЮ независимо от мест, где карточки новых заявок
-отправляются админам категории (handlers/accessories.py, handlers/technics.py,
-handlers/tradein.py, handlers/complaint_shared.py) — не встраивается ни в один
-из этих обработчиков, а опрашивает БД по claims.created_at/taken_at/reminder_stage
-(см. миграцию 007_add_claim_timer_fields.sql и функции в database.py). Это
-устраняет риск конфликтов правок с другими агентами, параллельно работающими
-именно с этими обработчиками.
-
-Стадии:
-  1 (5 мин)  — личное напоминание "ответственному" (см. get_responsible_admin_for_category).
-  2 (10 мин) — уведомление ВСЕМ админам категории (get_admins_by_role).
-  3 (15 мин) — уведомление ВСЕМ супер-администраторам (get_admins_by_role('super_admin')).
-
-Таймер останавливается (заявка перестаёт считаться просроченной), как только
-кто-то взял её в работу — mark_claim_taken(...), вызываемый либо из
-handlers/claim_timer.py (кнопка "🕐 Взять в работу"), либо из
-stop_claim_timer_if_needed(...) ниже (первое сообщение ответственного
-администратора в чате заявки, см. handlers/chat.py).
+Опрашивает БД по claims.created_at/taken_at/reminder_stage (миграция
+007_add_claim_timer_fields.sql). Кнопка «Взять в работу» удалена — напоминания
+только текстовые. Таймер останавливается при первом сообщении ответственного
+администратора в чате заявки (stop_claim_timer_if_needed → mark_claim_taken)
+либо когда заявка перестаёт быть pending.
 """
 import asyncio
 import logging
@@ -33,14 +20,13 @@ from database import (
     mark_claim_taken,
     CLAIM_CATEGORY_ADMIN_ROLE,
 )
-from keyboards import get_take_into_work_button
-from utils.telegram_helpers import build_user_mention, get_category_label, register_take_into_work_card
+from keyboards import get_chat_button
+from utils.telegram_helpers import build_user_mention, get_category_label
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 30
 
-# stage -> порог в минутах с момента создания заявки.
 STAGE_THRESHOLDS_MINUTES = {
     1: 5,
     2: 10,
@@ -65,21 +51,18 @@ def _claim_summary_content(claim: dict, header: str) -> Text:
 
 
 async def _notify_one(user_id: int, content: Text, claim_id: int) -> None:
-    """Отправка одного уведомления + отдельным сообщением кнопка "Взять в
-    работу" (см. keyboards.get_take_into_work_button). Обёрнуто в try/except
-    по аналогии с utils/notifications.notify_super_admins_of_decision — ошибка
-    отправки одному получателю не должна прерывать рассылку остальным."""
+    """Одно напоминание о просрочке + кнопка чата заявки (без «Взять в работу»)."""
     try:
-        await bot.send_message(user_id, **content.as_kwargs())
-        action_msg = await bot.send_message(
-            user_id, "👇 Действие по заявке:", reply_markup=get_take_into_work_button(claim_id)
+        await bot.send_message(
+            user_id,
+            reply_markup=get_chat_button(claim_id),
+            **content.as_kwargs(),
         )
-        # Отдельное сообщение с ОДНОЙ кнопкой — после взятия в работу с него
-        # нужно убрать клавиатуру целиком (markup_after_take=None), в отличие
-        # от карточек решения, где рядом остаются Одобрить/Отклонить/Чат.
-        register_take_into_work_card(claim_id, action_msg.chat.id, action_msg.message_id, None)
     except Exception as exc:
-        logger.warning("Failed to send claim timer notification to user_id=%s (claim_id=%s): %s", user_id, claim_id, exc)
+        logger.warning(
+            "Failed to send claim timer notification to user_id=%s (claim_id=%s): %s",
+            user_id, claim_id, exc,
+        )
 
 
 async def _process_stage(stage: int, minutes: int) -> None:
@@ -130,11 +113,7 @@ async def _process_stage(stage: int, minutes: int) -> None:
 
 
 async def claim_timer_loop():
-    """Бесконечный цикл опроса БД на предмет просроченных заявок.
-
-    Запускается аналогично существующему scheduler_task() в main.py —
-    отдельной asyncio.create_task(...), без встраивания в места отправки
-    карточек заявок."""
+    """Бесконечный цикл опроса БД на предмет просроченных заявок."""
     logger.info(
         "Таймер отсутствия ответа на заявку запущен (интервал опроса: %sс, пороги: 5/10/15 мин)",
         POLL_INTERVAL_SECONDS
@@ -149,10 +128,8 @@ async def claim_timer_loop():
 
 
 async def stop_claim_timer_if_needed(claim_id: int, admin_id: int) -> None:
-    """Останавливает таймер по заявке (эквивалент "взятия в работу"), если он
-    ещё не остановлен. Предназначена для вызова из handlers/chat.py в момент
-    первого сообщения ОТВЕТСТВЕННОГО АДМИНИСТРАТОРА (не автора заявки) в чате
-    этой заявки — см. подробности подключения в отчёте агента."""
+    """Останавливает таймер по заявке при первом сообщении ответственного
+    администратора в чате (handlers/chat.py)."""
     try:
         await mark_claim_taken(claim_id, admin_id)
     except Exception as exc:

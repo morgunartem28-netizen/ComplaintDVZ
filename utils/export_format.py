@@ -1,6 +1,8 @@
 import re
 from datetime import datetime
 
+from utils.tz import to_local
+
 STATUS_RU = {
     "pending": "Ожидает",
     "approved": "Одобрено",
@@ -94,8 +96,15 @@ _PARSE_DATETIME_FORMATS = (
 )
 
 
-def format_datetime_export(value) -> str:
-    """Единый формат для Excel/CSV: ДД.ММ.ГГГГ ЧЧ:ММ (без секунд)."""
+def format_datetime_export(value, assume_utc: bool = False) -> str:
+    """Единый формат для Excel/CSV: ДД.ММ.ГГГГ ЧЧ:ММ (без секунд).
+
+    assume_utc=True — значение (claims.created_at / claim_history.changed_at,
+    оба хранятся как SQLite CURRENT_TIMESTAMP, т.е. фактически UTC) переводится
+    в Asia/Yekaterinburg перед форматированием (см. utils.tz). Для полей без
+    времени (например purchase_date — уже "гражданская" дата без часового
+    пояса) параметр передавать не нужно/оставлять False.
+    """
     if value is None:
         return ""
 
@@ -106,12 +115,16 @@ def format_datetime_export(value) -> str:
     for fmt in _PARSE_DATETIME_FORMATS:
         try:
             dt = datetime.strptime(text[:26], fmt)
+            if assume_utc:
+                dt = to_local(dt) or dt
             return dt.strftime(EXPORT_DATETIME_FMT)
         except ValueError:
             continue
 
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if assume_utc:
+            dt = to_local(dt) or dt
         return dt.strftime(EXPORT_DATETIME_FMT)
     except ValueError:
         pass
@@ -122,6 +135,8 @@ def format_datetime_export(value) -> str:
         if re.match(r"^\d{4}-\d{2}-\d{2}$", date_part):
             try:
                 dt = datetime.strptime(f"{date_part} {time_short}", "%Y-%m-%d %H:%M")
+                if assume_utc:
+                    dt = to_local(dt) or dt
                 return dt.strftime(EXPORT_DATETIME_FMT)
             except ValueError:
                 pass
@@ -130,9 +145,9 @@ def format_datetime_export(value) -> str:
     return text
 
 
-def split_datetime_export(value) -> tuple[str, str]:
+def split_datetime_export(value, assume_utc: bool = False) -> tuple[str, str]:
     """Дата и время отдельно: ДД.ММ.ГГГГ и ЧЧ:ММ."""
-    full = format_datetime_export(value)
+    full = format_datetime_export(value, assume_utc=assume_utc)
     if not full or " " not in full:
         return full, ""
     date_part, time_part = full.split(" ", 1)

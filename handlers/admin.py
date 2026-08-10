@@ -8,8 +8,8 @@ from database import (
     try_update_claim_status
 )
 from keyboards import (
-    get_super_admin_menu, get_role_selection_buttons, get_main_menu, 
-    get_stock_adjustment_request_buttons, get_chat_button
+    get_super_admin_menu, get_role_selection_buttons, get_main_menu,
+    get_chat_button
 )
 from bot_instance import bot
 from states import AdminActionFSM, SuperAdminFSM
@@ -102,17 +102,10 @@ async def admin_approve(cb: CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.warning("Failed to notify user on approve: %s", e)
 
-        if claim['category'] == 'acc':
-            try:
-                await bot.send_message(
-                    user_id, 
-                    f"📋 **Рекомендация по заявке {display_id}**\n\n"
-                    f"Если необходимо скорректировать остатки товара, отправьте запрос Факиевой Эльвире", 
-                    reply_markup=get_stock_adjustment_request_buttons(claim_id), 
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.warning("Failed to send stock adjustment suggestion: %s", e)
+        # Блок «отправить запрос на корректировку остатков» после одобрения
+        # аксессуара временно отключён (кнопка скрыта из UI). Логика
+        # get_stock_adjustment_request_buttons / acc_stock_request_* остаётся
+        # в коде для возможного возврата функционала.
 
         await notify_super_admins_of_decision(claim, cb.from_user.id, full_name, "Одобрено")
         logger.info("Claim %s approved by admin_id=%s (category=%s)", display_id, cb.from_user.id, claim['category'])

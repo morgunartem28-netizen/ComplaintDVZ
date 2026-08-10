@@ -3,7 +3,7 @@
 Корректировка остатков)."""
 import pytest
 
-from utils.validation import is_valid_date_ddmmyyyy, parse_money
+from utils.validation import is_valid_date_ddmmyyyy, parse_money, format_money_rub
 
 
 class TestIsValidDateDdmmyyyy:
@@ -54,3 +54,11 @@ class TestParseMoney:
 
     def test_negative_allowed_when_flag_set(self):
         assert parse_money("-100", allow_negative=True) == -100.0
+
+
+class TestFormatMoneyRub:
+    def test_thousands_separator(self):
+        assert format_money_rub(50000) == "50 000 ₽"
+
+    def test_small_amount(self):
+        assert format_money_rub(999) == "999 ₽"

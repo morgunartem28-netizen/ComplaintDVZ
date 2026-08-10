@@ -15,9 +15,8 @@ from bot_instance import bot
 from database import get_admins_by_role, get_claim
 from keyboards import (
     get_complaint_admin_keyboard, get_main_menu, append_chat_button_row, get_chat_button,
-    append_take_into_work_row, strip_take_into_work_row,
 )
-from utils.telegram_helpers import cleanup_tracked_messages, register_take_into_work_card
+from utils.telegram_helpers import cleanup_tracked_messages
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +59,15 @@ async def send_to_complaint_admins(
     show_chat_button = bool(claim) and claim.get('category') == 'complaint'
     if show_chat_button:
         append_chat_button_row(admin_keyboard, claim_id)
-    append_take_into_work_row(admin_keyboard, claim_id)
 
-    markup_after_take = strip_take_into_work_row(admin_keyboard)
     sent_count = 0
     for admin_id in complaint_admins:
         try:
-            sent = await bot.send_message(
+            await bot.send_message(
                 chat_id=admin_id,
                 reply_markup=admin_keyboard,
                 **content.as_kwargs()
             )
-            register_take_into_work_card(claim_id, sent.chat.id, sent.message_id, markup_after_take)
             sent_count += 1
         except Exception as e:
             logger.error("Failed sending complaint message to admin %s: %s", admin_id, e)

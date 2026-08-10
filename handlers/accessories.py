@@ -5,17 +5,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import Text, Bold
 from database import create_claim, get_admins_by_role
 from keyboards import (
-    get_wish_buttons, get_admin_decision, get_stock_adjustment_request_buttons, get_main_menu,
-    append_chat_button_row, get_chat_button, append_take_into_work_row, strip_take_into_work_row
+    get_wish_buttons, get_admin_decision,
+    append_chat_button_row, get_chat_button,
 )
 from states import AccState
 from bot_instance import bot
 import logging
-from utils.validation import is_valid_date_ddmmyyyy
+from utils.validation import is_valid_date_ddmmyyyy, is_future_date_ddmmyyyy, FUTURE_PURCHASE_DATE_TEXT
 from utils.telegram_helpers import (
     get_telegram_name, safe_delete_message, build_user_mention,
     with_cancel_button, cancel_only_keyboard, track_message, cleanup_tracked_messages,
-    register_take_into_work_card,
+    track_prompt_after_cleanup,
 )
 
 router = Router()
@@ -59,7 +59,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
 
     if target_state == AccState.client_name:
         sent = await cb.message.answer("👤 Укажите своё имя и фамилию:", reply_markup=cancel_only_keyboard())
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(AccState.client_name)
     
     elif target_state == AccState.nomenclature:
@@ -68,7 +68,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
             "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):",
             reply_markup=with_cancel_button(kb)
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(AccState.nomenclature)
     
     elif target_state == AccState.date:
@@ -77,7 +77,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
             "📅 Укажите дату продажи в формате ДД.ММ.ГГГГ (например: 25.10.2023):",
             reply_markup=with_cancel_button(kb)
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(AccState.date)
     
     elif target_state == AccState.photo:
@@ -86,7 +86,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
             "📸 Отправьте фото упаковки товара (обязательно):",
             reply_markup=with_cancel_button(kb)
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(AccState.photo)
     
     elif target_state == AccState.defect:
@@ -95,7 +95,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
             "📝 Опишите дефект со слов клиента:",
             reply_markup=with_cancel_button(kb)
         )
-        await track_message(state, sent)
+        await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(AccState.defect)
 
     await cb.answer("Вернулись на шаг назад")
@@ -107,6 +107,7 @@ async def acc_back_handler(cb: CallbackQuery, state: FSMContext):
 
 @router.message(F.text == "Аксессуар")
 async def acc_start(message: Message, state: FSMContext):
+    await cleanup_tracked_messages(message.bot, state)
     await state.clear()
     sent = await message.answer("👤 Укажите своё имя и фамилию:", reply_markup=cancel_only_keyboard())
     await track_message(state, sent)
@@ -127,7 +128,7 @@ async def acc_client_name_received(message: Message, state: FSMContext):
         "📦 Укажите номенклатуру из 1С (Пример: Адаптер APPLE USB-C 20W MHJE3ZM/A):",
         reply_markup=cancel_only_keyboard()
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(AccState.nomenclature)
 
 
@@ -147,7 +148,7 @@ async def acc_nomenclature_received(message: Message, state: FSMContext):
         "📅 Укажите дату продажи в формате ДД.ММ.ГГГГ (например: 25.10.2023):",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(AccState.date)
 
 
@@ -160,21 +161,26 @@ async def _acc_sale_date_confirmed(target: Message | CallbackQuery, state: FSMCo
         "📸 Отправьте фото упаковки товара (обязательно):",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(AccState.photo)
 
 
 @router.message(AccState.date, F.text.regexp(r'^\d{2}\.\d{2}\.\d{4}$'))
 async def acc_date_valid(message: Message, state: FSMContext):
     await track_message(state, message)
-    if not is_valid_date_ddmmyyyy(message.text):
+    date_str = message.text.strip()
+    if not is_valid_date_ddmmyyyy(date_str):
         sent = await message.answer(
             "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
             reply_markup=cancel_only_keyboard()
         )
         await track_message(state, sent)
         return
-    await _acc_sale_date_confirmed(message, state, message.text)
+    if is_future_date_ddmmyyyy(date_str):
+        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=cancel_only_keyboard())
+        await track_message(state, sent)
+        return
+    await _acc_sale_date_confirmed(message, state, date_str)
 
 
 @router.message(AccState.date)
@@ -197,7 +203,7 @@ async def acc_photo_received(message: Message, state: FSMContext):
         "📝 Опишите дефект со слов клиента:",
         reply_markup=with_cancel_button(kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(AccState.defect)
 
 
@@ -226,7 +232,7 @@ async def acc_defect_received(message: Message, state: FSMContext):
         "💬 Что требует клиент?",
         reply_markup=with_cancel_button(wish_kb)
     )
-    await track_message(state, sent)
+    await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(AccState.wish)
 
 
@@ -246,6 +252,13 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
     if not photo_id:
         logger.error("Accessories flow missing photo_id in state: %s", data)
         await cb.message.answer("❌ Ошибка: фото не найдено. Начните заявку заново.")
+        await state.clear()
+        return
+
+    # Второй уровень защиты от будущей даты продажи (см. acc_date_valid).
+    if is_future_date_ddmmyyyy(date_sale):
+        await cb.message.answer(f"❌ {FUTURE_PURCHASE_DATE_TEXT} Начните заново.")
+        logger.warning("Blocked accessories claim creation with future date_sale=%s user_id=%s", date_sale, cb.from_user.id)
         await state.clear()
         return
 
@@ -304,19 +317,16 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
 
     keyboard = get_admin_decision(internal_id)
     append_chat_button_row(keyboard, internal_id)
-    append_take_into_work_row(keyboard, internal_id)
 
-    markup_after_take = strip_take_into_work_row(keyboard)
     notified = 0
     for admin_id in target_admins:
         try:
-            sent = await bot.send_photo(
+            await bot.send_photo(
                 chat_id=admin_id,
                 photo=photo_id,
                 reply_markup=keyboard,
                 **content.as_caption_kwargs()
             )
-            register_take_into_work_card(internal_id, sent.chat.id, sent.message_id, markup_after_take)
             notified += 1
         except Exception as e:
             logger.error("Failed sending accessories claim %s to admin %s: %s", display_id, admin_id, e)

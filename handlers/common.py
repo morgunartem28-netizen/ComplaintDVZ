@@ -7,7 +7,7 @@ from database import (
     get_stats_overview, get_pending_claims, get_all_admins_list,
 )
 from keyboards import (
-    get_main_menu, get_tech_type_buttons, get_adjustment_type_buttons, get_chat_button,
+    get_main_menu, get_tech_type_buttons, get_chat_button,
     get_admin_panel_quick_actions,
 )
 from states import TechState, AccState, TradeinState
@@ -129,6 +129,9 @@ async def admin_panel_denied(message: Message):
 
 @router.message(F.text == "Техника")
 async def tech_start(message: Message, state: FSMContext):
+    # Сначала удаляем хвост прошлого незавершённого сценария (если был),
+    # иначе state.clear() сотрёт список без удаления сообщений в чате.
+    await cleanup_tracked_messages(message.bot, state)
     await state.clear()
     sent = await message.answer(
         "Выберите тип обращения:",
@@ -139,6 +142,7 @@ async def tech_start(message: Message, state: FSMContext):
 
 @router.message(F.text == "Trade-in")
 async def tradein_start(message: Message, state: FSMContext):
+    await cleanup_tracked_messages(message.bot, state)
     await state.clear()
     sent = await message.answer(
         "Trade-in\n\nУкажите модель устройства. Пример: iPhone 14",
@@ -150,13 +154,13 @@ async def tradein_start(message: Message, state: FSMContext):
 
 @router.message(F.text == "Запрос на корректировку остатков")
 async def adjustment_start(message: Message, state: FSMContext):
+    # Функционал временно отключён: кнопка убрана из get_main_menu(), но
+    # на случай ручного ввода текста отвечаем отказом и не открываем сценарий.
     await state.clear()
-    sent = await message.answer(
-        "Запрос на корректировку остатков\n\n"
-        "Выберите тип корректировки:",
-        reply_markup=with_cancel_button(get_adjustment_type_buttons())
+    await message.answer(
+        "Функция «Запрос на корректировку остатков» временно недоступна.",
+        reply_markup=get_main_menu(),
     )
-    await track_message(state, sent)
 
 @router.inline_query(F.query)
 async def inline_search_claim(inline_query: InlineQuery):

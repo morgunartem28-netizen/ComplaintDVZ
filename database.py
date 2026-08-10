@@ -63,13 +63,13 @@ async def archive_old_claims(days: int = 365):
                 id, display_id, user_id, category, sub_category, brand,
                 defect_desc, purchase_date, client_wish, photo_id, status,
                 admin_comment, admin_name, client_name, tg_name, created_at,
-                payment_method, competitor_offer, chat_locked
+                payment_method, competitor_offer, chat_locked, buyout_amount
             )
             SELECT
                 id, display_id, user_id, category, sub_category, brand,
                 defect_desc, purchase_date, client_wish, photo_id, status,
                 admin_comment, admin_name, client_name, tg_name, created_at,
-                payment_method, competitor_offer, chat_locked
+                payment_method, competitor_offer, chat_locked, buyout_amount
             FROM claims
             WHERE date(created_at) < date('now', '-{days} days')
         """)
@@ -386,6 +386,21 @@ async def update_claim_status(claim_id: int, status: str, comment: str = None, a
             (status, comment, admin_name, claim_id)
         )
         await db.commit()
+
+
+async def set_claim_buyout_amount(claim_id: int, amount: int) -> bool:
+    """Сохраняет фактическую сумму выкупа Trade-in (целое число рублей).
+
+    Возвращает True, если строка заявки обновлена. Не трогает status/admin —
+    итог сделки ТТ вторичен относительно админского решения (см. tradein outcome).
+    """
+    async with get_connection() as db:
+        cursor = await db.execute(
+            "UPDATE claims SET buyout_amount = ? WHERE id = ?",
+            (int(amount), claim_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 async def try_update_claim_status(claim_id: int, status: str, comment: str = None, admin_name: str = None) -> tuple:
     async with get_connection() as db:
@@ -852,7 +867,9 @@ async def _fetch_export_rows(days: int | None = None) -> list:
             resolved_at,
         ) = row
 
-        resolved_date, resolved_time = split_datetime_export(resolved_at)
+        # created_at / resolved_at в БД — UTC (CURRENT_TIMESTAMP); для отчёта
+        # показываем Asia/Yekaterinburg (см. utils.tz / assume_utc=True).
+        resolved_date, resolved_time = split_datetime_export(resolved_at, assume_utc=True)
         export_rows.append([
             claim_id,
             display_id,
@@ -870,7 +887,7 @@ async def _fetch_export_rows(days: int | None = None) -> list:
             tg_name,
             payment_method or "",
             competitor_offer or "",
-            format_datetime_export(created_at),
+            format_datetime_export(created_at, assume_utc=True),
             resolved_date,
             resolved_time,
         ])
@@ -962,19 +979,15 @@ async def clear_all_claims():
 # ==========================================
 # ТАЙМЕР ОТСУТСТВИЯ ОТВЕТА НА ЗАЯВКУ (5/10/15 МИН)
 # ==========================================
-# "Взятие в работу" фиксируется ОДНИМ полем claims.taken_at, независимо от
-# того, произошло ли оно через кнопку "🕐 Взять в работу" (см. handlers/claim_timer.py)
-# или автоматически по первому сообщению ответственного администратора в чате
-# заявки (см. utils/claim_timer_service.stop_claim_timer_if_needed, вызывается
-# из handlers/chat.py). reminder_stage хранит, до какой стадии напоминаний
-# (0/1/2/3) уже дошла заявка, чтобы claim_timer_loop не рассылал повторные
-# уведомления на каждом цикле опроса.
+# taken_at/taken_by — момент «реакции» на заявку для остановки таймера
+# напоминаний 5/10/15 мин. Сейчас выставляется из чата заявки
+# (utils/claim_timer_service.stop_claim_timer_if_needed ← handlers/chat.py).
+# reminder_stage — до какой стадии напоминаний уже дошла заявка.
 
 async def mark_claim_taken(claim_id: int, admin_id: int) -> bool:
-    """Фиксирует взятие заявки в работу, но только если это ещё не сделано
-    (первый успевший — забирает заявку). Возвращает True, если именно этот
-    вызов установил taken_at (гонка с другим админом/с чатом разрешена на
-    уровне SQL через `WHERE taken_at IS NULL`, а не в Python)."""
+    """Фиксирует реакцию на заявку (остановка таймера напоминаний), только если
+    ещё не зафиксирована. Возвращает True, если именно этот вызов установил
+    taken_at (SQL: `WHERE taken_at IS NULL`)."""
     async with get_connection() as db:
         cursor = await db.execute(
             "UPDATE claims SET taken_at = CURRENT_TIMESTAMP, taken_by = ? WHERE id = ? AND taken_at IS NULL",

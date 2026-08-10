@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from aiogram.utils.formatting import Text, Bold
 
@@ -7,6 +6,7 @@ from bot_instance import bot
 from database import get_admins_by_role, add_chat_system_message, set_claim_chat_locked
 from keyboards import get_chat_button
 from utils.telegram_helpers import build_user_mention, get_category_label
+from utils.tz import now_local, DEFAULT_DISPLAY_FORMAT
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ async def notify_super_admins_of_decision(
         claim.get("user_id"),
         claim.get("tg_name") or claim.get("client_name"),
     )
-    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    timestamp = now_local().strftime(DEFAULT_DISPLAY_FORMAT)
 
     admin_node = build_user_mention(admin_id, admin_name) if admin_id else (admin_name or "—")
     content = Text(

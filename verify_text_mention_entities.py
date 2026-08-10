@@ -397,14 +397,14 @@ def test_tradein_approve_finish_content():
     from aiogram.utils.formatting import Text as _Text, Bold as _Bold
 
     price, admin_name, admin_id = "15000", "Artem", 358530649
-    dkp_link = "https://example.com/dkp"
     content = _Text(
         "✅ ", _Bold("Заявка одобрена!"), "\n\n",
         "💰 ", _Bold("Стоимость выкупа:"), " ", price, "\n",
         "👨‍💼 ", _Bold("Ответственный:"), " ", build_user_mention(admin_id, admin_name), "\n\n",
-        "📎 ", _Bold("Требуется подписать договор:"), " ", dkp_link, "\n\n",
-        "Когда сделка будет завершена (устройство принято или клиент отказался), ",
-        "отметьте итог кнопкой ниже:",
+        "📎 ", _Bold("Требуется подписать договор купли-продажи Trade-in"), "\n",
+        "Файл договора и инструкция по заполнению — в следующих сообщениях.\n\n",
+        "Когда сделка будет завершена, отметьте итог кнопкой ниже "
+        "(«Сделка состоялась» или «Сделка не состоялась»):",
     )
     check(
         "handlers/tradein.py: tradein_admin_approve_finish (user notify)",

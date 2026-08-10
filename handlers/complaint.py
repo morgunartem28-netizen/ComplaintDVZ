@@ -53,30 +53,16 @@ def back_btn_exchange(target_state: str) -> InlineKeyboardButton:
 
 @router.callback_query(F.data == "adj_acc")
 async def adjustment_acc_selected(cb: CallbackQuery, state: FSMContext):
-    await cb.message.delete()
-    await cb.message.answer(
-        "Для корректировки аксессуаров необходима одобренная заявка на возврат или обмен. "
-        "Просьба создать новую заявку."
-    )
-    # Запускаем алгоритм аксессуаров
-    from states import AccState
-    sent = await cb.message.answer("Укажите свое имя и фамилию:", reply_markup=cancel_only_keyboard())
-    await track_message(state, sent)
-    await state.set_state(AccState.client_name)
-    await cb.answer("Перенаправляем на создание заявки на аксессуар")
+    # Вход через меню временно отключён (кнопка убрана из get_main_menu).
+    # Старые inline-клавиатуры тоже не должны открывать сценарий.
+    await state.clear()
+    await cb.answer("Функция временно недоступна", show_alert=True)
 
 
 @router.callback_query(F.data == "adj_tech")
 async def adjustment_tech_selected(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await state.update_data(adjustment_scope="tech")
-    await _safe_delete_message(cb)
-    sent = await cb.message.answer(
-        "Необходимо провести возврат или обмен техники?",
-        reply_markup=with_cancel_button(get_return_or_exchange_buttons())
-    )
-    await track_message(state, sent)
-    await cb.answer("Выберите тип операции")
+    await cb.answer("Функция временно недоступна", show_alert=True)
 
 
 # ==========================================
