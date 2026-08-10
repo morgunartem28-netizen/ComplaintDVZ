@@ -649,43 +649,58 @@ def is_claim_chat_locked(claim: dict) -> bool:
 async def get_admins_by_role(role_prefix: str):
     async with get_connection() as db:
         if role_prefix == 'super_admin':
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin' ORDER BY user_id")
             rows = await cursor.fetchall()
             db_admins = [row[0] for row in rows]
-            return list(set(db_admins + ENV_SUPER_ADMIN_IDS))
+            return list(dict.fromkeys(db_admins + ENV_SUPER_ADMIN_IDS))
         
         elif role_prefix == 'admin_acc':
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_acc'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_acc' ORDER BY user_id")
             acc_admins = [row[0] for row in await cursor.fetchall()]
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin' ORDER BY user_id")
             super_admins = [row[0] for row in await cursor.fetchall()]
-            return list(set(acc_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+            # Сначала ответственные за аксессуары, затем супер-админы (без set(),
+            # чтобы порядок был стабильным — важно для get_responsible_admin_for_category).
+            return list(dict.fromkeys(acc_admins + super_admins + ENV_SUPER_ADMIN_IDS))
         
         elif role_prefix == 'admin_tech':
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_tech'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_tech' ORDER BY user_id")
             tech_admins = [row[0] for row in await cursor.fetchall()]
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin' ORDER BY user_id")
             super_admins = [row[0] for row in await cursor.fetchall()]
-            return list(set(tech_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+            return list(dict.fromkeys(tech_admins + super_admins + ENV_SUPER_ADMIN_IDS))
         
         elif role_prefix == 'admin_tradein':
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_tradein'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_tradein' ORDER BY user_id")
             tradein_admins = [row[0] for row in await cursor.fetchall()]
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin' ORDER BY user_id")
             super_admins = [row[0] for row in await cursor.fetchall()]
-            return list(set(tradein_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+            return list(dict.fromkeys(tradein_admins + super_admins + ENV_SUPER_ADMIN_IDS))
         
         elif role_prefix == 'admin_complaint':
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_complaint'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'admin_complaint' ORDER BY user_id")
             complaint_admins = [row[0] for row in await cursor.fetchall()]
-            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin'")
+            cursor = await db.execute("SELECT user_id FROM users WHERE role = 'super_admin' ORDER BY user_id")
             super_admins = [row[0] for row in await cursor.fetchall()]
-            return list(set(complaint_admins + super_admins + ENV_SUPER_ADMIN_IDS))
+            return list(dict.fromkeys(complaint_admins + super_admins + ENV_SUPER_ADMIN_IDS))
         
         else:
             cursor = await db.execute("SELECT user_id FROM users WHERE role = ?", (role_prefix,))
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+
+async def get_category_role_admins_only(category: str) -> list[int]:
+    """Только админы роли категории (без супер-админов) — для «ответственного»."""
+    role_prefix = CLAIM_CATEGORY_ADMIN_ROLE.get(category)
+    if not role_prefix:
+        return []
+    async with get_connection() as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM users WHERE role = ? ORDER BY user_id",
+            (role_prefix,)
+        )
+        return [row[0] for row in await cursor.fetchall()]
 
 
 async def get_all_admins_list() -> dict:
@@ -1031,22 +1046,74 @@ async def set_claim_reminder_stage(claim_id: int, stage: int) -> None:
         await db.commit()
 
 
-async def get_responsible_admin_for_category(category: str) -> int | None:
-    """Временное упрощение: до момента "взятия в работу" в проекте нет понятия
-    персонального закрепления заявки за конкретным админом — "ответственным"
-    для личного напоминания на 5-минутной стадии считается ПЕРВЫЙ в списке
-    get_admins_by_role(...) для этой категории (список формируется из таблицы
-    users без гарантированного порядка "кто сейчас свободен/дежурит").
+async def save_claim_admin_card(claim_id: int, chat_id: int, message_id: int) -> None:
+    """Сохраняет message_id карточки заявки в чате админа для reply-напоминаний
+    таймера (аксы / техника / Trade-in / корректировка остатков)."""
+    if not claim_id or not chat_id or not message_id:
+        return
+    async with get_connection() as db:
+        await db.execute(
+            """
+            INSERT INTO claim_admin_cards (claim_id, chat_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(claim_id, chat_id) DO UPDATE SET
+                message_id = excluded.message_id,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (int(claim_id), int(chat_id), int(message_id))
+        )
+        await db.commit()
 
-    Более правильная альтернатива на будущее — round-robin (или дежурство по
-    графику) с отдельным полем/таблицей "текущий дежурный по категории", но
-    это не реализуется сейчас, чтобы не переусложнять таймер.
+
+async def get_claim_admin_card_message_id(claim_id: int, chat_id: int) -> int | None:
+    """message_id исходной карточки заявки в чате chat_id, либо None."""
+    async with get_connection() as db:
+        cursor = await db.execute(
+            "SELECT message_id FROM claim_admin_cards WHERE claim_id = ? AND chat_id = ?",
+            (int(claim_id), int(chat_id))
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row else None
+
+
+async def get_claim_admin_card_chat_ids(claim_id: int) -> list[int]:
+    """Все chat_id, куда уже ушла карточка этой заявки (для напоминаний)."""
+    async with get_connection() as db:
+        cursor = await db.execute(
+            "SELECT chat_id FROM claim_admin_cards WHERE claim_id = ? ORDER BY chat_id",
+            (int(claim_id),)
+        )
+        return [int(row[0]) for row in await cursor.fetchall()]
+
+
+async def get_stage1_reminder_recipients(category: str, claim_id: int) -> list[int]:
+    """Получатели напоминания на 5-й минуте.
+
+    1) Все админы роли категории (admin_acc / admin_tech / …).
+    2) Если роли никого нет — все, кому уже отправили карточку заявки.
+    3) Если карточек тоже нет — все супер-админы.
     """
-    role_prefix = CLAIM_CATEGORY_ADMIN_ROLE.get(category)
-    if not role_prefix:
-        return None
-    admins = await get_admins_by_role(role_prefix)
-    return admins[0] if admins else None
+    role_admins = await get_category_role_admins_only(category)
+    if role_admins:
+        return list(dict.fromkeys(role_admins))
+
+    card_chats = await get_claim_admin_card_chat_ids(claim_id)
+    if card_chats:
+        return list(dict.fromkeys(card_chats))
+
+    return list(dict.fromkeys(await get_admins_by_role('super_admin')))
+
+
+async def get_responsible_admin_for_category(category: str) -> int | None:
+    """Первый админ роли категории; если роли нет — первый супер-админ.
+
+    Оставлен для совместимости; таймер 5 мин использует get_stage1_reminder_recipients.
+    """
+    role_admins = await get_category_role_admins_only(category)
+    if role_admins:
+        return role_admins[0]
+    supers = await get_admins_by_role('super_admin')
+    return supers[0] if supers else None
 
 
 async def get_overdue_claims_detailed() -> list[dict]:

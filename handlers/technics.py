@@ -2,10 +2,10 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import Text, Bold, Italic
-from database import create_claim, get_admins_by_role, update_claim_status, add_claim_history
+from database import create_claim, get_admins_by_role, update_claim_status, add_claim_history, save_claim_admin_card
 from keyboards import (
     get_mp_buttons, get_warranty_status_buttons, get_imei_missing_button, append_chat_button_row,
-    get_chat_button,
+    get_chat_button, get_ptv_admin_decision,
 )
 from states import TechState
 from bot_instance import bot
@@ -336,10 +336,7 @@ async def process_ptv_claim(message: Message, state: FSMContext, user):
         "👤 ", Bold("ТТ:"), " ", build_user_mention(user.id, user.full_name),
     )
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Возврат/Обмен", callback_data=f"adm_ptv_return_{internal_id}")],
-        [InlineKeyboardButton(text="🔧 Гарантийное обслуживание", callback_data=f"adm_ptv_repair_{internal_id}")]
-    ])
+    kb = get_ptv_admin_decision(internal_id)
     append_chat_button_row(kb, internal_id)
 
     admins = await get_admins_by_role('admin_tech')
@@ -352,8 +349,11 @@ async def process_ptv_claim(message: Message, state: FSMContext, user):
         try:
             if media_list:
                 await bot.send_media_group(chat_id=admin_id, media=media_list)
-            await bot.send_message(chat_id=admin_id, **content.as_kwargs())
-            await bot.send_message(chat_id=admin_id, text="Выберите решение по заявке:", reply_markup=kb)
+            card_msg = await bot.send_message(chat_id=admin_id, **content.as_kwargs())
+            await bot.send_message(
+                chat_id=admin_id, text="Выберите решение по заявке:", reply_markup=kb
+            )
+            await save_claim_admin_card(internal_id, card_msg.chat.id, card_msg.message_id)
             notified += 1
         except Exception as e:
             logger.error("Failed to send PTV claim %s to admin %s: %s", display_id, admin_id, e)
@@ -792,11 +792,12 @@ async def process_new_device_claim(message: Message, state: FSMContext, user):
         try:
             if media_list:
                 await bot.send_media_group(chat_id=admin_id, media=media_list)
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=admin_id,
                 reply_markup=get_chat_button(internal_id),
                 **content.as_kwargs()
             )
+            await save_claim_admin_card(internal_id, sent.chat.id, sent.message_id)
             notified += 1
         except Exception as e:
             logger.error("Failed sending new-device claim %s to admin %s: %s", display_id, admin_id, e)

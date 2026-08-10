@@ -319,6 +319,38 @@ def append_chat_button_row(kb: InlineKeyboardMarkup, claim_id: int) -> InlineKey
     return kb
 
 
+def get_ptv_admin_decision(claim_id: int) -> InlineKeyboardMarkup:
+    """Кнопки решения по заявке ПТВ."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Возврат/Обмен", callback_data=f"adm_ptv_return_{claim_id}")],
+        [InlineKeyboardButton(text="🔧 Гарантийное обслуживание", callback_data=f"adm_ptv_repair_{claim_id}")]
+    ])
+
+
+def get_pending_claim_actions(
+    claim_id: int,
+    category: str,
+    sub_category: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Клавиатура действий для напоминания о непринятом решении (таймер 5/10/15).
+
+    Повторяет кнопки исходной карточки, чтобы с напоминания можно было сразу
+    работать по заявке, не листая историю чата.
+    """
+    if category == 'acc':
+        kb = get_admin_decision(claim_id)
+    elif category == 'tradein':
+        kb = get_tradein_admin_decision(claim_id)
+    elif category == 'complaint':
+        kb = get_complaint_admin_keyboard(claim_id)
+    elif category == 'tech' and sub_category == 'ПТВ':
+        kb = get_ptv_admin_decision(claim_id)
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[])
+    append_chat_button_row(kb, claim_id)
+    return kb
+
+
 def get_chat_history_keyboard(
     claim_id: int,
     is_locked: bool,

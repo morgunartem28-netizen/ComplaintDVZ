@@ -12,7 +12,7 @@ from aiogram.types import Message
 from aiogram.utils.formatting import Text
 
 from bot_instance import bot
-from database import get_admins_by_role, get_claim
+from database import get_admins_by_role, get_claim, save_claim_admin_card
 from keyboards import (
     get_complaint_admin_keyboard, get_main_menu, append_chat_button_row, get_chat_button,
 )
@@ -63,11 +63,12 @@ async def send_to_complaint_admins(
     sent_count = 0
     for admin_id in complaint_admins:
         try:
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=admin_id,
                 reply_markup=admin_keyboard,
                 **content.as_kwargs()
             )
+            await save_claim_admin_card(claim_id, sent.chat.id, sent.message_id)
             sent_count += 1
         except Exception as e:
             logger.error("Failed sending complaint message to admin %s: %s", admin_id, e)

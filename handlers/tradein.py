@@ -5,7 +5,7 @@ from aiogram.utils.formatting import Text, Bold
 from database import (
     create_claim, get_admins_by_role, get_claim, add_claim_history, log_action, try_update_claim_status,
     add_chat_system_message, get_chat_messages, get_claim_responsible_admin_info,
-    set_claim_buyout_amount,
+    set_claim_buyout_amount, save_claim_admin_card,
 )
 from keyboards import (
     get_tradein_admin_decision, get_main_menu, get_tradein_sim_buttons, get_tradein_condition_buttons,
@@ -1013,11 +1013,12 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
             try:
                 if media_list:
                     await bot.send_media_group(chat_id=admin_id, media=media_list)
-                await bot.send_message(
+                sent = await bot.send_message(
                     chat_id=admin_id,
                     reply_markup=keyboard,
                     **content.as_kwargs()
                 )
+                await save_claim_admin_card(internal_id, sent.chat.id, sent.message_id)
                 notified += 1
                 break  # Успешно отправлено
             except Exception as e:

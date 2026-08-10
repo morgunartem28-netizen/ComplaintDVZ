@@ -3,7 +3,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import Text, Bold
-from database import create_claim, get_admins_by_role
+from database import create_claim, get_admins_by_role, save_claim_admin_card
 from keyboards import (
     get_wish_buttons, get_admin_decision,
     append_chat_button_row, get_chat_button,
@@ -301,7 +301,14 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
 
     target_admins = await get_admins_by_role('admin_acc')
     if not target_admins:
-        await cb.message.answer("⚠️ Ошибка системы: нет администраторов для обработки заявки.")
+        logger.error(
+            "Accessories claim %s: no admin_acc and no super_admin recipients",
+            display_id,
+        )
+        await cb.message.answer(
+            "⚠️ Заявка сохранена, но администратор по аксессуарам не назначен "
+            "(и нет супер-админов). Назначьте admin_acc в панели супер-админа."
+        )
         return
 
     content = Text(
@@ -320,14 +327,40 @@ async def acc_wish_selected(cb: CallbackQuery, state: FSMContext):
 
     notified = 0
     for admin_id in target_admins:
+        sent = None
         try:
-            await bot.send_photo(
+            sent = await bot.send_photo(
                 chat_id=admin_id,
                 photo=photo_id,
                 reply_markup=keyboard,
                 **content.as_caption_kwargs()
             )
+        except Exception as photo_exc:
+            logger.warning(
+                "Accessories claim %s: photo to admin %s failed (%s), falling back to text",
+                display_id, admin_id, photo_exc,
+            )
+            try:
+                sent = await bot.send_message(
+                    chat_id=admin_id,
+                    reply_markup=keyboard,
+                    **content.as_kwargs()
+                )
+            except Exception as text_exc:
+                logger.error(
+                    "Failed sending accessories claim %s to admin %s: %s",
+                    display_id, admin_id, text_exc,
+                )
+                continue
+        if sent is not None:
+            await save_claim_admin_card(internal_id, sent.chat.id, sent.message_id)
             notified += 1
-        except Exception as e:
-            logger.error("Failed sending accessories claim %s to admin %s: %s", display_id, admin_id, e)
-    logger.info("Accessories claim %s notified %s/%s admins", display_id, notified, len(target_admins))
+    logger.info(
+        "Accessories claim %s notified %s/%s admins (admin_acc + super_admin)",
+        display_id, notified, len(target_admins),
+    )
+    if notified == 0:
+        await cb.message.answer(
+            "⚠️ Заявка сохранена, но ни одному администратору доставить её не удалось. "
+            "Проверьте, что admin_acc / супер-админы запускали бота (/start)."
+        )
