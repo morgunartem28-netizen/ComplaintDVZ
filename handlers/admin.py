@@ -16,11 +16,39 @@ from states import AdminActionFSM, SuperAdminFSM
 from filters import IsSuperAdmin
 import logging
 from utils.markdown import escape_markdown
-from utils.notifications import notify_super_admins_of_decision
+from utils.notifications import notify_super_admins_of_decision, notify_tt_of_acc_decision
 from utils.telegram_helpers import deny_access, build_user_mention
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+async def _mark_admin_card_resolved(message, claim_id: int, stamp: str) -> None:
+    """Снимает кнопки решения с карточки админа и (по возможности) ставит штамп.
+
+    Ошибка UI не должна прерывать уведомления ТТ/админам — поэтому всё в try.
+    Без parse_mode: исходный caption мог содержать символы, ломающие Markdown.
+    """
+    kb = get_chat_button(claim_id)
+    try:
+        if getattr(message, "photo", None):
+            base = message.caption or ""
+            await message.edit_caption(caption=f"{base}\n\n{stamp}", reply_markup=kb)
+            return
+        if getattr(message, "text", None):
+            await message.edit_text(text=f"{message.text}\n\n{stamp}", reply_markup=kb)
+            return
+        await message.edit_reply_markup(reply_markup=kb)
+    except Exception as exc:
+        logger.warning("Failed to stamp admin card for claim_id=%s: %s", claim_id, exc)
+        try:
+            await message.edit_reply_markup(reply_markup=kb)
+        except Exception as markup_exc:
+            logger.warning(
+                "Failed to clear admin card keyboard for claim_id=%s: %s",
+                claim_id, markup_exc,
+            )
+
 
 # ==========================================
 # ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ПРОВЕРКИ ДОСТУПА
@@ -51,6 +79,10 @@ async def admin_approve(cb: CallbackQuery, state: FSMContext):
             await cb.answer("Заявка не найдена", show_alert=True)
             return
 
+        if claim.get('category') != 'acc':
+            await cb.answer("Эта кнопка только для заявок по аксессуарам", show_alert=True)
+            return
+
         if not await check_admin_access(cb.from_user.id, claim['category']):
             await cb.answer("⛔ У вас нет прав для обработки этой заявки", show_alert=True)
             return
@@ -78,41 +110,29 @@ async def admin_approve(cb: CallbackQuery, state: FSMContext):
         # Успешно обновлено — продолжаем стандартный flow
         old_status = claim.get('status', "pending")
         display_id = claim.get('display_id', f'#{claim_id}')
+        fresh = updated_claim or claim
 
         await add_claim_history(claim_id, display_id, old_status, 'approved', cb.from_user.id, full_name)
         await log_action(cb.from_user.id, 'approve', claim_id)
 
-        safe_admin_name = escape_markdown(full_name)
-        new_caption = f"{cb.message.caption}\n\n✅ **ОДОБРЕНО** (Админ: {safe_admin_name})"
-        await cb.message.edit_caption(caption=new_caption, parse_mode="Markdown", reply_markup=get_chat_button(claim_id))
+        # UI карточки — отдельно: падение edit_caption раньше рвало весь handler
+        # и ТТ/админы не получали итог, хотя статус уже был approved.
+        await _mark_admin_card_resolved(
+            cb.message, claim_id, f"✅ ОДОБРЕНО (Админ: {full_name})"
+        )
 
-        user_id = claim.get('user_id')
-        try:
-            content = Text(
-                "✅ Ваша заявка ", Bold(display_id), " одобрена!\n",
-                "Решение принял: ", build_user_mention(cb.from_user.id, full_name), "\n\n",
-                "⚠️ Если возвращённый товар непригоден для продажи "
-                "(не работает, сломан, разбит и т.д.), его необходимо отбраковать и приложить номер заявки к накладной.",
-            )
-            await bot.send_message(
-                user_id,
-                reply_markup=get_chat_button(claim_id),
-                **content.as_kwargs(),
-            )
-        except Exception as e:
-            logger.warning("Failed to notify user on approve: %s", e)
-
-        # Блок «отправить запрос на корректировку остатков» после одобрения
-        # аксессуара временно отключён (кнопка скрыта из UI). Логика
-        # get_stock_adjustment_request_buttons / acc_stock_request_* остаётся
-        # в коде для возможного возврата функционала.
-
-        await notify_super_admins_of_decision(claim, cb.from_user.id, full_name, "Одобрено")
+        await notify_tt_of_acc_decision(
+            fresh, cb.from_user.id, full_name, approved=True
+        )
+        await notify_super_admins_of_decision(
+            fresh, cb.from_user.id, full_name, "Заявка одобрена!"
+        )
         logger.info("Claim %s approved by admin_id=%s (category=%s)", display_id, cb.from_user.id, claim['category'])
+        await cb.answer("Заявка одобрена")
 
     except Exception as e:
         logger.error("Error during admin approve: %s", e)
-        await cb.answer("Произошла ошибка при обработке.")
+        await cb.answer("Произошла ошибка при обработке.", show_alert=True)
 
 # ==========================================
 # ОТКЛОНЕНИЕ ЗАЯВКИ
@@ -124,6 +144,10 @@ async def admin_reject_start(cb: CallbackQuery, state: FSMContext):
     
     if not claim:
         await cb.answer("Заявка не найдена", show_alert=True)
+        return
+
+    if claim.get('category') != 'acc':
+        await cb.answer("Эта кнопка только для заявок по аксессуарам", show_alert=True)
         return
 
     if not await check_admin_access(cb.from_user.id, claim['category']):
@@ -141,9 +165,15 @@ async def admin_reject_start(cb: CallbackQuery, state: FSMContext):
         )
         return
 
-    await state.update_data(reject_claim_id=claim_id, claim_category=claim['category'])
+    await state.update_data(
+        reject_claim_id=claim_id,
+        claim_category=claim['category'],
+        reject_card_chat_id=cb.message.chat.id if cb.message else None,
+        reject_card_message_id=cb.message.message_id if cb.message else None,
+    )
     await cb.message.answer("📝 Введите причину отказа:")
     await state.set_state(AdminActionFSM.reject_comment)
+    await cb.answer()
 
 @router.message(AdminActionFSM.reject_comment)
 async def admin_reject_finish(message: Message, state: FSMContext):
@@ -158,6 +188,11 @@ async def admin_reject_finish(message: Message, state: FSMContext):
     claim = await get_claim(claim_id)
     if claim and not await check_admin_access(message.from_user.id, claim['category']):
         await message.answer("⛔ У вас нет прав для обработки этой заявки.")
+        await state.clear()
+        return
+
+    if claim and claim.get('category') != 'acc':
+        await message.answer("⚠️ Этот сценарий отказа только для аксессуаров.")
         await state.clear()
         return
 
@@ -184,31 +219,46 @@ async def admin_reject_finish(message: Message, state: FSMContext):
 
     old_status = claim.get('status', "pending") if claim else "pending"
     display_id = claim.get('display_id', f'#{claim_id}') if claim else f'#{claim_id}'
+    fresh = updated_claim or claim or {}
 
     await add_claim_history(claim_id, display_id, old_status, 'rejected', message.from_user.id, full_name, message.text)
     await log_action(message.from_user.id, 'reject', claim_id)
-    
+
+    # Штамп на исходной карточке (если помним message_id) — best effort.
+    card_chat_id = data.get('reject_card_chat_id')
+    card_message_id = data.get('reject_card_message_id')
     await state.clear()
-    await message.answer("✅ Заявка отклонена, сотрудник уведомлен.", reply_markup=get_chat_button(claim_id))
 
-    if claim:
-        user_id = claim.get('user_id')
+    if card_chat_id and card_message_id:
         try:
-            content = Text(
-                "❌ Заявка ", Bold(display_id), " отклонена.\n",
-                "Причина: ", message.text, "\n",
-                "Решение принял: ", build_user_mention(message.from_user.id, full_name),
-            )
-            await bot.send_message(
-                user_id,
+            await bot.edit_message_reply_markup(
+                chat_id=card_chat_id,
+                message_id=card_message_id,
                 reply_markup=get_chat_button(claim_id),
-                **content.as_kwargs(),
             )
-        except Exception as e:
-            logger.warning("Failed to notify user on reject: %s", e)
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear reject card keyboard claim_id=%s: %s",
+                claim_id, exc,
+            )
 
-        await notify_super_admins_of_decision(claim, message.from_user.id, full_name, "Отклонено", message.text)
-        logger.info("Claim %s rejected by admin_id=%s (category=%s)", display_id, message.from_user.id, claim['category'])
+    await message.answer("✅ Заявка отклонена.", reply_markup=get_chat_button(claim_id))
+
+    if fresh:
+        await notify_tt_of_acc_decision(
+            fresh,
+            message.from_user.id,
+            full_name,
+            approved=False,
+            comment=message.text,
+        )
+        await notify_super_admins_of_decision(
+            fresh, message.from_user.id, full_name, "Заявка отклонена.", message.text
+        )
+        logger.info(
+            "Claim %s rejected by admin_id=%s (category=%s)",
+            display_id, message.from_user.id, fresh.get('category'),
+        )
 
 # ==========================================
 # ПТВ — ВОЗВРАТ/ОБМЕН

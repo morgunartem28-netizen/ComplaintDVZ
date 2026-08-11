@@ -361,17 +361,22 @@ async def test_notifications_decision():
     point_node = await _resolve_point_mention_node(TEST_USER_ID, TEST_NAME)
     category_label, admin_name, decision, timestamp, comment = "Техника", "Смирнов", "Одобрено", "01.01.2024 12:00", "Всё ок"
     admin_id = 999001
+    item, status = "iPhone 12", "approved"
     admin_node = build_user_mention(admin_id, admin_name)
 
     content = _Text(
         "🔔 ", _Bold("Решение по заявке Т1"), "\n",
         "━━━━━━━━━━━━━━━━━━━━\n",
         "📂 ", _Bold("Тип:"), " ", category_label, "\n",
+        "📦 ", _Bold("Товар:"), " ", item, "\n",
         "🏢 ", _Bold("Точка (ТТ):"), " ", point_node, "\n",
-        "👤 ", _Bold("Администратор:"), " ", admin_node, "\n",
         "📌 ", _Bold("Решение:"), " ", decision, "\n",
+        "📋 ", _Bold("Статус:"), " ", status, "\n",
         "🕒 ", _Bold("Дата:"), " ", timestamp, "\n",
-        "💬 ", _Bold("Комментарий:"), " ", (comment if comment else "—"),
+        "💬 ", _Bold("Комментарий:"), " ", (comment if comment else "—"), "\n",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+        _Bold("Решение принял:"), "\n",
+        "👤 ", admin_node,
     )
     check(
         "utils/notifications.py: notify_super_admins_of_decision (content)",
