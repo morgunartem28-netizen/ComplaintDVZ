@@ -53,6 +53,13 @@ async def notify_tt_of_acc_decision(
 
     Возвращает True, если сообщение ушло. Ошибка отправки не пробрасывается.
     """
+    from utils.bot_config import is_notify_enabled, get_text
+
+    event = "approve" if approved else "reject"
+    if not await is_notify_enabled(event, "tt"):
+        logger.info("TT Acc decision notify skipped by setting notify.%s.tt", event)
+        return False
+
     tt_id = claim.get("user_id")
     if not tt_id:
         logger.error(
@@ -66,36 +73,27 @@ async def notify_tt_of_acc_decision(
     admin_node = build_user_mention(admin_id, admin_name) if admin_id else (admin_name or "—")
 
     if approved:
-        parts = [
-            Bold("Заявка одобрена!"), "\n\n",
-            Bold("Номер заявки:"), " ", display_id, "\n",
-            Bold("Аксессуар:"), " ", item, "\n\n",
-            Bold("Решение принял:"), "\n",
-            admin_node, "\n\n",
-            "⚠️ Если возвращённый товар непригоден для продажи "
-            "(не работает, сломан, разбит и т.д.), его необходимо отбраковать "
-            "и приложить номер заявки к накладной.",
-        ]
+        body = await get_text(
+            "acc.tt.approved",
+            display_id=display_id,
+            item=item,
+            admin_name=admin_name or "—",
+        )
     else:
-        parts = [
-            Bold("Заявка отклонена."), "\n\n",
-            Bold("Номер заявки:"), " ", display_id, "\n",
-            Bold("Аксессуар:"), " ", item, "\n\n",
-        ]
-        if comment:
-            parts.extend([Bold("Причина:"), " ", comment, "\n\n"])
-        parts.extend([
-            Bold("Решение принял:"), "\n",
-            admin_node,
-        ])
+        body = await get_text(
+            "acc.tt.rejected",
+            display_id=display_id,
+            item=item,
+            comment=comment or "—",
+            admin_name=admin_name or "—",
+        )
 
-    content = Text(*parts)
     claim_id = claim.get("id")
     try:
         await bot.send_message(
             tt_id,
+            body,
             reply_markup=get_chat_button(claim_id) if claim_id else None,
-            **content.as_kwargs(),
         )
         logger.info(
             "TT notified about Acc decision on claim %s: approved=%s tt_id=%s",
@@ -156,6 +154,22 @@ async def notify_super_admins_of_decision(
             "No decision-notification recipients for claim %s (decision maker=%s excluded or none configured)",
             display_id, admin_id,
         )
+        return
+
+    from utils.bot_config import is_notify_enabled
+    from database import get_user_role
+
+    decision_l = (decision or "").lower()
+    event = "reject" if ("отклон" in decision_l or "отказ" in decision_l) else "approve"
+    filtered = []
+    for uid in recipients:
+        role = await get_user_role(uid)
+        aud = "supers" if role == "super_admin" else "admins"
+        if await is_notify_enabled(event, aud):
+            filtered.append(uid)
+    recipients = filtered
+    if not recipients:
+        logger.info("Decision notify skipped by settings for claim %s event=%s", display_id, event)
         return
 
     category_label = get_category_label(claim.get("category"), claim.get("sub_category"))

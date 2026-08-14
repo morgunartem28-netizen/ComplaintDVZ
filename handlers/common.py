@@ -11,13 +11,14 @@ from keyboards import (
     get_admin_panel_quick_actions,
 )
 from states import TechState, AccState, TradeinState
-from filters import IsSuperAdmin
+from filters import IsSuperAdmin, MainMenuButton
 import re
 import logging
 from utils.telegram_helpers import (
     build_user_mention, cleanup_tracked_messages, FLOW_CANCEL_CALLBACK,
     track_message, with_cancel_button, cancel_only_keyboard,
 )
+from utils.bot_config import get_text
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ async def cmd_start(message: Message, state: FSMContext):
     else:
         role = current_role
     
-    text = "Привет! Я бот для приема рекламаций.\nВыберите категорию ниже."
+    text = await get_text("common.welcome")
     if role != 'user':
         role_names = {
             'admin_tech': 'Техника',
@@ -47,19 +48,19 @@ async def cmd_start(message: Message, state: FSMContext):
         role_display = role_names.get(role, role)
         text += f"\n\nВаша роль: {role_display}"
     
-    await message.answer(text, reply_markup=get_main_menu())
+    await message.answer(text, reply_markup=await get_main_menu())
 
 @router.message(F.text == "/cancel")
 @router.message(F.text == "Отмена")
 async def cmd_cancel(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
-        await message.answer("Нет активной операции для отмены.", reply_markup=get_main_menu())
+        await message.answer(await get_text("common.no_cancel"), reply_markup=await get_main_menu())
         return
     await state.clear()
     await message.answer(
-        "Операция отменена.\n\nВыберите категорию:",
-        reply_markup=get_main_menu()
+        await get_text("common.cancel_done"),
+        reply_markup=await get_main_menu()
     )
 
 
@@ -82,7 +83,7 @@ async def cb_flow_cancel(cb: CallbackQuery, state: FSMContext):
     else:
         text = "Операция отменена.\n\nВыберите категорию:"
     if cb.message:
-        await cb.bot.send_message(cb.message.chat.id, text, reply_markup=get_main_menu())
+        await cb.bot.send_message(cb.message.chat.id, text, reply_markup=await get_main_menu())
     await cb.answer()
 
 
@@ -127,7 +128,7 @@ async def admin_panel(message: Message):
 async def admin_panel_denied(message: Message):
     await message.answer("⛔ Доступ запрещен. Команда только для супер-администраторов.")
 
-@router.message(F.text == "Техника")
+@router.message(MainMenuButton("tech"))
 async def tech_start(message: Message, state: FSMContext):
     # Сначала удаляем хвост прошлого незавершённого сценария (если был),
     # иначе state.clear() сотрёт список без удаления сообщений в чате.
@@ -135,32 +136,34 @@ async def tech_start(message: Message, state: FSMContext):
     await state.clear()
     sent = await message.answer(
         "Выберите тип обращения:",
-        reply_markup=with_cancel_button(get_tech_type_buttons())
+        reply_markup=await with_cancel_button(await get_tech_type_buttons())
     )
     await track_message(state, sent)
     await state.set_state(TechState.type_choice)
 
-@router.message(F.text == "Trade-in")
+@router.message(MainMenuButton("tradein"))
 async def tradein_start(message: Message, state: FSMContext):
     await cleanup_tracked_messages(message.bot, state)
     await state.clear()
     sent = await message.answer(
         "Trade-in\n\nУкажите модель устройства. Пример: iPhone 14",
         parse_mode="Markdown",
-        reply_markup=cancel_only_keyboard()
+        reply_markup=await cancel_only_keyboard()
     )
     await track_message(state, sent)
     await state.set_state(TradeinState.model)
 
-@router.message(F.text == "Запрос на корректировку остатков")
+@router.message(MainMenuButton("stock_adjustment"))
 async def adjustment_start(message: Message, state: FSMContext):
-    # Функционал временно отключён: кнопка убрана из get_main_menu(), но
-    # на случай ручного ввода текста отвечаем отказом и не открываем сценарий.
+    """Вход в корректировку остатков, если кнопка включена в /manage."""
+    from keyboards import get_adjustment_type_buttons
+    await cleanup_tracked_messages(message.bot, state)
     await state.clear()
-    await message.answer(
-        "Функция «Запрос на корректировку остатков» временно недоступна.",
-        reply_markup=get_main_menu(),
+    sent = await message.answer(
+        "Запрос на корректировку остатков\n\nВыберите тип:",
+        reply_markup=await with_cancel_button(get_adjustment_type_buttons()),
     )
+    await track_message(state, sent)
 
 @router.inline_query(F.query)
 async def inline_search_claim(inline_query: InlineQuery):

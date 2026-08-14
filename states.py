@@ -124,3 +124,15 @@ class TechAdjustmentFSM(StatesGroup):
     exchange_location = State()
     exchange_receipt_voided = State()
     exchange_approver = State()
+
+
+class ManageFSM(StatesGroup):
+    """FSM панели /manage (CONFIG). Не пересекается с FSM заявок."""
+    waiting_text_value = State()
+    waiting_setting_value = State()
+    waiting_link_value = State()
+    waiting_button_label = State()
+    waiting_file_document = State()
+    waiting_tt_id = State()
+    waiting_tt_title = State()
+    waiting_timezone = State()

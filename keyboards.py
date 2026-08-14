@@ -1,43 +1,56 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-def get_main_menu():
-    # «Запрос на корректировку остатков» временно скрыт из меню (бизнес-логика
-    # handlers/complaint.py, handlers/tech_adjustment.py и callback'и остаются
-    # в коде — функционал можно вернуть, снова добавив кнопку сюда).
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Техника"), KeyboardButton(text="Аксессуар")],
-            [KeyboardButton(text="Trade-in")],
-        ],
-        resize_keyboard=True
-    )
-    return kb
 
-def get_cancel_keyboard():
+async def _btn(key: str, default: str) -> str:
+    """Подпись кнопки из bot_settings; callback_data остаётся в коде хендлеров."""
+    from utils.bot_config import get_setting
+    return await get_setting(key, default)
+
+
+async def get_main_menu():
+    """Главное меню; подписи кнопок берутся из bot_settings (с дефолтами)."""
+    tech = await _btn("button.main.tech", "Техника")
+    acc = await _btn("button.main.acc", "Аксессуар")
+    tradein = await _btn("button.main.tradein", "Trade-in")
+    show_stock = (await _btn("button.main.stock_adjustment", "0")) == "1"
+    stock_label = await _btn(
+        "button.main.stock_adjustment_label",
+        "Запрос на корректировку остатков",
+    )
+    rows = [
+        [KeyboardButton(text=tech), KeyboardButton(text=acc)],
+        [KeyboardButton(text=tradein)],
+    ]
+    if show_stock:
+        rows.append([KeyboardButton(text=stock_label)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+async def get_cancel_keyboard():
+    label = await _btn("button.common.cancel", "❌ Отмена")
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        keyboard=[[KeyboardButton(text=label)]],
         resize_keyboard=True
     )
 
-def get_tech_type_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛠 ПТВ", callback_data="tech_ptv")],
-        [InlineKeyboardButton(text="🆕 Новое устройство", callback_data="tech_new")]
+async def get_tech_type_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tech.ptv", "🛠 ПТВ"), callback_data="tech_ptv")],
+        [InlineKeyboardButton(text=await _btn("button.tech.new", "🆕 Новое устройство"), callback_data="tech_new")]
     ])
-    return kb
 
-def get_mp_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Да", callback_data="mp_yes")],
-        [InlineKeyboardButton(text="Нет", callback_data="mp_no")]
+async def get_mp_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tech.mp_yes", "Да"), callback_data="mp_yes")],
+        [InlineKeyboardButton(text=await _btn("button.tech.mp_no", "Нет"), callback_data="mp_no")]
     ])
-    return kb
 
-def get_wish_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Возврат", callback_data="wish_return"), InlineKeyboardButton(text="🔄 Обмен", callback_data="wish_exchange")]
+async def get_wish_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=await _btn("button.acc.wish_return", "↩️ Возврат"), callback_data="wish_return"),
+            InlineKeyboardButton(text=await _btn("button.acc.wish_exchange", "🔄 Обмен"), callback_data="wish_exchange"),
+        ]
     ])
-    return kb
 
 def get_admin_decision(claim_id: int):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -116,12 +129,17 @@ def get_stats_pagination(page: int, total_pages: int):
         [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="sa_stats_menu")]
     ])
 
-def get_warranty_status_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📸 Прикрепить фото талона", callback_data="warranty_photo")],
-        [InlineKeyboardButton(text="❌ Талон утерян", callback_data="warranty_lost")]
+async def get_warranty_status_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=await _btn("button.tech.warranty_photo", "📸 Прикрепить фото талона"),
+            callback_data="warranty_photo",
+        )],
+        [InlineKeyboardButton(
+            text=await _btn("button.tech.warranty_lost", "❌ Талон утерян"),
+            callback_data="warranty_lost",
+        )],
     ])
-    return kb
 
 def get_back_to_admin():
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -194,10 +212,17 @@ def get_item_location_buttons():
     ])
     return kb
 
-def get_imei_missing_button(callback_data: str = "imei_missing"):
+async def get_imei_missing_button(callback_data: str = "imei_missing"):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="IMEI отсутствует", callback_data=callback_data)]
+        [InlineKeyboardButton(
+            text=await _btn("button.tech.imei_missing", "IMEI отсутствует"),
+            callback_data=callback_data,
+        )]
     ])
+
+
+async def imei_missing_label() -> str:
+    return await _btn("button.tech.imei_missing", "IMEI отсутствует")
 
 # ==========================================
 # КЛАВИАТУРЫ ДЛЯ ПОДТЯГИВАНИЯ ДАННЫХ ИЗ ЗАЯВКИ
@@ -222,69 +247,64 @@ def get_create_without_claim_button():
 # КЛАВИАТУРЫ ДЛЯ TRADE-IN
 # ==========================================
 
-def get_tradein_sim_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Only eSim", callback_data="tradein_sim_esim")],
-        [InlineKeyboardButton(text="Dual Sim", callback_data="tradein_sim_dual")],
-        [InlineKeyboardButton(text="Sim+eSim", callback_data="tradein_sim_sim_esim")]
+async def get_tradein_sim_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.sim_esim", "Only eSim"), callback_data="tradein_sim_esim")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.sim_dual", "Dual Sim"), callback_data="tradein_sim_dual")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.sim_sim_esim", "Sim+eSim"), callback_data="tradein_sim_sim_esim")],
     ])
-    return kb
 
-def get_tradein_condition_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Как новый (без дефектов)", callback_data="tradein_cond_new")],
-        [InlineKeyboardButton(text="Следы эксплуатации", callback_data="tradein_cond_used")],
-        [InlineKeyboardButton(text="Разбитый", callback_data="tradein_cond_broken")]
+async def get_tradein_condition_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.cond_new", "Как новый (без дефектов)"), callback_data="tradein_cond_new")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.cond_used", "Следы эксплуатации"), callback_data="tradein_cond_used")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.cond_broken", "Разбитый"), callback_data="tradein_cond_broken")],
     ])
-    return kb
 
-def get_tradein_screen_condition_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Без дефектов", callback_data="tradein_screen_none")],
-        [InlineKeyboardButton(text="Мелкие царапины", callback_data="tradein_screen_minor")],
-        [InlineKeyboardButton(text="Глубокие царапины", callback_data="tradein_screen_deep")],
-        [InlineKeyboardButton(text="Сколы", callback_data="tradein_screen_chips")]
+async def get_tradein_screen_condition_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.screen_none", "Без дефектов"), callback_data="tradein_screen_none")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.screen_minor", "Мелкие царапины"), callback_data="tradein_screen_minor")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.screen_deep", "Глубокие царапины"), callback_data="tradein_screen_deep")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.screen_chips", "Сколы"), callback_data="tradein_screen_chips")],
     ])
-    return kb
 
-def get_tradein_body_condition_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Без дефектов", callback_data="tradein_body_none")],
-        [InlineKeyboardButton(text="Мелкие царапины", callback_data="tradein_body_minor")],
-        [InlineKeyboardButton(text="Глубокие царапины", callback_data="tradein_body_deep")],
-        [InlineKeyboardButton(text="Сколы", callback_data="tradein_body_chips")]
+async def get_tradein_body_condition_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.body_none", "Без дефектов"), callback_data="tradein_body_none")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.body_minor", "Мелкие царапины"), callback_data="tradein_body_minor")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.body_deep", "Глубокие царапины"), callback_data="tradein_body_deep")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.body_chips", "Сколы"), callback_data="tradein_body_chips")],
     ])
-    return kb
 
-def get_tradein_repair_choice_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Без ремонтов", callback_data="tradein_repair_none")],
-        [InlineKeyboardButton(text="Указать ремонты", callback_data="tradein_repair_specify")]
+async def get_tradein_repair_choice_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.repair_none", "Без ремонтов"), callback_data="tradein_repair_none")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.repair_specify", "Указать ремонты"), callback_data="tradein_repair_specify")],
     ])
-    return kb
 
-def get_tradein_payment_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Наличные", callback_data="tradein_pay_cash")],
-        [InlineKeyboardButton(text="Банковская карта", callback_data="tradein_pay_card")],
-        [InlineKeyboardButton(text="Кредит/Рассрочка", callback_data="tradein_pay_credit")]
+async def get_tradein_payment_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.pay_cash", "Наличные"), callback_data="tradein_pay_cash")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.pay_card", "Банковская карта"), callback_data="tradein_pay_card")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.pay_credit", "Кредит/Рассрочка"), callback_data="tradein_pay_credit")],
     ])
-    return kb
 
-def get_tradein_competitor_offer_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Не оценивали", callback_data="tradein_competitor_none")]
+async def get_tradein_competitor_offer_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.competitor_none", "Не оценивали"), callback_data="tradein_competitor_none")],
     ])
-    return kb
 
-def get_tradein_equipment_buttons():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Только техника", callback_data="tradein_equip_device_only")],
-        [InlineKeyboardButton(text="Техника + коробка", callback_data="tradein_equip_box")],
-        [InlineKeyboardButton(text="Техника + коробка + кабель", callback_data="tradein_equip_box_cable")],
-        [InlineKeyboardButton(text="Техника + коробка + кабель + сзу", callback_data="tradein_equip_box_cable_charger")]
+async def get_tradein_equipment_buttons():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=await _btn("button.tradein.equip_device_only", "Только техника"), callback_data="tradein_equip_device_only")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.equip_box", "Техника + коробка"), callback_data="tradein_equip_box")],
+        [InlineKeyboardButton(text=await _btn("button.tradein.equip_box_cable", "Техника + коробка + кабель"), callback_data="tradein_equip_box_cable")],
+        [InlineKeyboardButton(
+            text=await _btn("button.tradein.equip_box_cable_charger", "Техника + коробка + кабель + сзу"),
+            callback_data="tradein_equip_box_cable_charger",
+        )],
     ])
-    return kb
 
 def get_tradein_outcome_buttons(claim_id: int):
     """Кнопки решения ТТ по итогу сделки — показываются автору заявки ПОСЛЕ того,

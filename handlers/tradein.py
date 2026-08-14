@@ -156,7 +156,11 @@ async def tradein_back_handler(cb: CallbackQuery, state: FSMContext):
         "repair_choice": ("🔧 Были ли ремонты устройства?", "battery"),
         "repair": ("🔧 Укажите, что ремонтировалось:", "repair_choice"),
         "equipment": ("📦 Укажите комплектацию сдаваемого устройства:", "repair_choice"),
-        "activation_date": ("📅 Укажите дату активации устройства:\n\nПроверить дату активации можно на сайте:\nhttps://checkcoverage.apple.com/?locale=ru\\_RU", "equipment"),
+        "activation_date": (
+            "📅 Укажите дату активации устройства:\n\n"
+            "Проверить дату активации можно на сайте:\n{apple_coverage_url}",
+            "equipment",
+        ),
         "target_model": ("🎯 Укажите какую модель планируют брать:", "activation_date"),
         "payment_method": ("💳 Выберите форму оплаты:", "target_model"),
         "competitor_offer": ("🥊 Укажите сумму выкупа, предложенную конкурентом (или «Не оценивали»):", "payment_method"),
@@ -170,59 +174,64 @@ async def tradein_back_handler(cb: CallbackQuery, state: FSMContext):
     }
 
     prompt_text, back_target = prompts.get(callback_state, ("Продолжите ввод:", None))
+    if callback_state == "activation_date" and "{apple_coverage_url}" in prompt_text:
+        from utils.bot_config import get_setting
+        url = await get_setting("link.apple_coverage")
+        # Markdown: escape underscores in URL path for legacy parse_mode
+        prompt_text = prompt_text.format(apple_coverage_url=url.replace("_", "\\_"))
 
     # Шаги с выбором кнопок — восстанавливаем клавиатуру
     if callback_state == "condition":
-        kb = get_tradein_condition_buttons()
+        kb = await get_tradein_condition_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "screen_condition":
-        kb = get_tradein_screen_condition_buttons()
+        kb = await get_tradein_screen_condition_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "body_condition":
-        kb = get_tradein_body_condition_buttons()
+        kb = await get_tradein_body_condition_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "equipment":
-        kb = get_tradein_equipment_buttons()
+        kb = await get_tradein_equipment_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "sim":
-        kb = get_tradein_sim_buttons()
+        kb = await get_tradein_sim_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "repair_choice":
-        kb = get_tradein_repair_choice_buttons()
+        kb = await get_tradein_repair_choice_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "payment_method":
-        kb = get_tradein_payment_buttons()
+        kb = await get_tradein_payment_buttons()
         if back_target:
             kb.inline_keyboard.append([back_btn(back_target)])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif callback_state == "activation_date":
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn(back_target)]]) if back_target else InlineKeyboardMarkup(inline_keyboard=[])
-        kb = with_cancel_button(kb)
+        kb = await with_cancel_button(kb)
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     elif back_target:
-        kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn(back_target)]]))
+        kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn(back_target)]]))
         sent = await cb.message.answer(prompt_text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        sent = await cb.message.answer(prompt_text, reply_markup=cancel_only_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
+        sent = await cb.message.answer(prompt_text, reply_markup=await cancel_only_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
 
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(target_state)
@@ -238,14 +247,14 @@ async def tradein_model_received(message: Message, state: FSMContext):
     await track_message(state, message)
     model = message.text.strip() if message.text else ""
     if not model:
-        sent = await message.answer("⚠️ Модель не может быть пустой. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Модель не может быть пустой. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     
     await state.update_data(model=model)
     sent = await message.answer(
         "📱 Выберите тип SIM:",
-        reply_markup=with_cancel_button(get_tradein_sim_buttons())
+        reply_markup=await with_cancel_button(await get_tradein_sim_buttons())
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.sim)
@@ -272,7 +281,7 @@ async def tradein_sim_selected(cb: CallbackQuery, state: FSMContext):
     
     await _safe_delete_message(cb)
     
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("sim")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("sim")]]))
     sent = await cb.message.answer(
         "💾 Укажите память устройства:",
         reply_markup=kb
@@ -287,14 +296,14 @@ async def tradein_memory_received(message: Message, state: FSMContext):
     await track_message(state, message)
     memory = message.text.strip() if message.text else ""
     if not memory:
-        sent = await message.answer("⚠️ Укажите память. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Укажите память. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     
     await state.update_data(memory=memory)
     sent = await message.answer(
         "🔍 Выберите состояние устройства:",
-        reply_markup=with_cancel_button(get_tradein_condition_buttons())
+        reply_markup=await with_cancel_button(await get_tradein_condition_buttons())
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.condition)
@@ -328,7 +337,7 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
         await cb.message.answer(
             "❌ **Приём в Trade-in невозможен!**",
             parse_mode="Markdown",
-            reply_markup=get_main_menu()
+            reply_markup=await get_main_menu()
         )
         await cb.answer("Отказано: устройство разбитое")
         return
@@ -337,11 +346,11 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
 
     # === «СЛЕДЫ ЭКСПЛУАТАЦИИ» — сначала экран, затем корпус ===
     if cb.data == "tradein_cond_used":
-        kb = get_tradein_screen_condition_buttons()
+        kb = await get_tradein_screen_condition_buttons()
         kb.inline_keyboard.append([back_btn("condition")])
         sent = await cb.message.answer(
             "📱 Выберите состояние экрана:",
-            reply_markup=with_cancel_button(kb)
+            reply_markup=await with_cancel_button(kb)
         )
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TradeinState.screen_condition)
@@ -351,7 +360,7 @@ async def tradein_condition_selected(cb: CallbackQuery, state: FSMContext):
     # === «КАК НОВЫЙ» — сразу к аккумулятору ===
     # Сбрасываем детали экрана/корпуса, если ранее выбирали «Следы эксплуатации»
     await state.update_data(screen_condition=None, body_condition=None)
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("condition")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("condition")]]))
     sent = await cb.message.answer(
         "🔋 Укажите какой % у аккумулятора:",
         reply_markup=kb
@@ -381,11 +390,11 @@ async def tradein_screen_condition_selected(cb: CallbackQuery, state: FSMContext
     await state.update_data(screen_condition=screen_condition)
     await _safe_delete_message(cb)
 
-    kb = get_tradein_body_condition_buttons()
+    kb = await get_tradein_body_condition_buttons()
     kb.inline_keyboard.append([back_btn("screen_condition")])
     sent = await cb.message.answer(
         "📦 Выберите состояние корпуса:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.body_condition)
@@ -412,7 +421,7 @@ async def tradein_body_condition_selected(cb: CallbackQuery, state: FSMContext):
     await state.update_data(body_condition=body_condition)
     await _safe_delete_message(cb)
 
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("body_condition")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("body_condition")]]))
     sent = await cb.message.answer(
         "🔋 Укажите какой % у аккумулятора:",
         reply_markup=kb
@@ -427,16 +436,16 @@ async def tradein_battery_received(message: Message, state: FSMContext):
     await track_message(state, message)
     battery = message.text.strip() if message.text else ""
     if not battery:
-        sent = await message.answer("⚠️ Укажите % аккумулятора. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Укажите % аккумулятора. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     
     await state.update_data(battery=battery)
-    kb = get_tradein_repair_choice_buttons()
+    kb = await get_tradein_repair_choice_buttons()
     kb.inline_keyboard.append([back_btn("battery")])
     sent = await message.answer(
         "🔧 Были ли ремонты устройства?",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.repair_choice)
@@ -451,18 +460,18 @@ async def tradein_repair_choice_selected(cb: CallbackQuery, state: FSMContext):
     if cb.data == "tradein_repair_none":
         await state.update_data(repair="Без ремонтов")
         await _safe_delete_message(cb)
-        kb = get_tradein_equipment_buttons()
+        kb = await get_tradein_equipment_buttons()
         kb.inline_keyboard.append([back_btn("repair_choice")])
         sent = await cb.message.answer(
             "📦 Укажите комплектацию сдаваемого устройства:",
-            reply_markup=with_cancel_button(kb)
+            reply_markup=await with_cancel_button(kb)
         )
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TradeinState.equipment)
         await cb.answer("Без ремонтов")
     elif cb.data == "tradein_repair_specify":
         await _safe_delete_message(cb)
-        kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("repair_choice")]]))
+        kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("repair_choice")]]))
         sent = await cb.message.answer(
             "🔧 Укажите, что ремонтировалось (например: замена дисплея, замена аккумулятора, после воды):",
             reply_markup=kb
@@ -479,16 +488,16 @@ async def tradein_repair_received(message: Message, state: FSMContext):
     await track_message(state, message)
     repair = message.text.strip() if message.text else ""
     if not repair:
-        sent = await message.answer("⚠️ Укажите информацию о ремонте. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Укажите информацию о ремонте. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     
     await state.update_data(repair=repair)
-    kb = get_tradein_equipment_buttons()
+    kb = await get_tradein_equipment_buttons()
     kb.inline_keyboard.append([back_btn("repair_choice")])
     sent = await message.answer(
         "📦 Укажите комплектацию сдаваемого устройства:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.equipment)
@@ -514,11 +523,13 @@ async def tradein_equipment_selected(cb: CallbackQuery, state: FSMContext):
     await state.update_data(equipment=equipment)
     await _safe_delete_message(cb)
 
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("equipment")]]))
+    from utils.bot_config import get_setting
+    apple_url = (await get_setting("link.apple_coverage")).replace("_", "\\_")
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("equipment")]]))
     sent = await cb.message.answer(
         "📅 Укажите дату активации устройства:\n\n"
         "Проверить дату активации можно на сайте:\n"
-        "https://checkcoverage.apple.com/?locale=ru\\_RU",
+        f"{apple_url}",
         reply_markup=kb,
         parse_mode="Markdown",
         disable_web_page_preview=True
@@ -531,7 +542,7 @@ async def tradein_equipment_selected(cb: CallbackQuery, state: FSMContext):
 async def _tradein_activation_confirmed(target: Message | CallbackQuery, state: FSMContext, date_str: str) -> None:
     """Общий "хвост" после успешно подтверждённой даты активации."""
     await state.update_data(activation_date=date_str)
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("activation_date")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("activation_date")]]))
     answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
     sent = await answer(
         "🎯 Укажите какую модель планируют брать:",
@@ -548,12 +559,12 @@ async def tradein_activation_valid(message: Message, state: FSMContext):
     if not is_valid_date_ddmmyyyy(activation):
         sent = await message.answer(
             "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
-            reply_markup=cancel_only_keyboard()
+            reply_markup=await cancel_only_keyboard()
         )
         await track_message(state, sent)
         return
     if is_future_date_ddmmyyyy(activation):
-        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=cancel_only_keyboard())
+        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await _tradein_activation_confirmed(message, state, activation)
@@ -563,7 +574,7 @@ async def tradein_activation_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
     sent = await message.answer(
         "⚠️ Неверный формат даты!\nПожалуйста, введите дату ТОЛЬКО в формате ДД.ММ.ГГГГ (например: 15.03.2023):",
-        reply_markup=cancel_only_keyboard()
+        reply_markup=await cancel_only_keyboard()
     )
     await track_message(state, sent)
 
@@ -575,17 +586,17 @@ async def tradein_target_model_received(message: Message, state: FSMContext):
     if not target_model:
         sent = await message.answer(
             "⚠️ Укажите модель, которую планируют брать. Повторите ввод:",
-            reply_markup=cancel_only_keyboard()
+            reply_markup=await cancel_only_keyboard()
         )
         await track_message(state, sent)
         return
     
     await state.update_data(target_model=target_model)
-    kb = get_tradein_payment_buttons()
+    kb = await get_tradein_payment_buttons()
     kb.inline_keyboard.append([back_btn("target_model")])
     sent = await message.answer(
         "💳 Выберите форму оплаты:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.payment_method)
@@ -610,12 +621,12 @@ async def tradein_payment_selected(cb: CallbackQuery, state: FSMContext):
     await state.update_data(payment_method=payment_method)
     await _safe_delete_message(cb)
     
-    kb = get_tradein_competitor_offer_buttons()
+    kb = await get_tradein_competitor_offer_buttons()
     kb.inline_keyboard.append([back_btn("payment_method")])
     sent = await cb.message.answer(
         "🥊 Укажите сумму выкупа, предложенную конкурентом (если есть).\n"
         "Если устройство ранее нигде не оценивалось, нажмите «Не оценивали».",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TradeinState.competitor_offer)
@@ -630,7 +641,7 @@ async def tradein_payment_selected(cb: CallbackQuery, state: FSMContext):
 async def tradein_competitor_offer_none(cb: CallbackQuery, state: FSMContext):
     await state.update_data(competitor_offer="Не оценивали")
     await _safe_delete_message(cb)
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("competitor_offer")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("competitor_offer")]]))
     sent = await cb.message.answer(
         "👤 Введите ФИО сотрудника, принимающего устройство:",
         reply_markup=kb
@@ -647,13 +658,13 @@ async def tradein_competitor_offer_received(message: Message, state: FSMContext)
     if not competitor_offer:
         sent = await message.answer(
             "⚠️ Укажите сумму выкупа от конкурента или нажмите «Не оценивали»:",
-            reply_markup=cancel_only_keyboard()
+            reply_markup=await cancel_only_keyboard()
         )
         await track_message(state, sent)
         return
     
     await state.update_data(competitor_offer=competitor_offer)
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("competitor_offer")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("competitor_offer")]]))
     sent = await message.answer(
         "👤 Введите ФИО сотрудника, принимающего устройство:",
         reply_markup=kb
@@ -671,12 +682,12 @@ async def tradein_receiver_name_received(message: Message, state: FSMContext):
     await track_message(state, message)
     receiver_name = message.text.strip() if message.text else ""
     if not receiver_name:
-        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
 
     await state.update_data(receiver_name=receiver_name)
-    kb = with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("receiver_name")]]))
+    kb = await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[[back_btn("receiver_name")]]))
     sent = await message.answer(
         "📸 Отправьте 2-3 фотографии устройства (одним сообщением).\n\n"
         "⚠️ Перед фотографированием и передачей устройства обязательно снимите "
@@ -701,7 +712,7 @@ async def tradein_photos_received(message: Message, state: FSMContext):
     _cleanup_pending_media_groups()
     photos = message.photo
     if not photos or len(photos) == 0:
-        sent = await message.answer("⚠️ Пожалуйста, отправьте фотографии:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Пожалуйста, отправьте фотографии:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     
@@ -720,7 +731,7 @@ async def tradein_photos_received(message: Message, state: FSMContext):
         else:
             sent = await message.answer(
                 f"📸 Получено {len(existing)} фото. Отправьте ещё минимум 1 фото.",
-                reply_markup=with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[
+                reply_markup=await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[
                     [back_btn("receiver_name")]
                 ]))
             )
@@ -787,7 +798,7 @@ async def _process_media_group(media_group_id: str, state: FSMContext, message: 
                 sent = await bot.send_message(
                     user_id,
                     f"📸 Получено {len(existing)} фото. Нужно минимум 2. Отправьте ещё.",
-                    reply_markup=with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[
+                    reply_markup=await with_cancel_button(InlineKeyboardMarkup(inline_keyboard=[
                         [back_btn("receiver_name")]
                     ]))
                 )
@@ -836,7 +847,7 @@ async def _finalize_photos(message: Message, state: FSMContext, photos: list):
             try:
                 await message.answer(
                     "❌ Ошибка сети при отправке заявки. Попробуйте позже или обратитесь к администратору.",
-                    reply_markup=get_main_menu()
+                    reply_markup=await get_main_menu()
                 )
             except Exception as exc:
                 logger.warning("Failed to send tradein network error notice: %s", exc)
@@ -948,7 +959,7 @@ async def process_tradein_claim(message: Message, state: FSMContext, user):
                 f"✅ Ваша заявка **{display_id}** (Trade-in) принята в обработку!\n"
                 f"Ожидайте решения администратора.",
                 parse_mode="Markdown",
-                reply_markup=get_main_menu()
+                reply_markup=await get_main_menu()
             )
             await message.answer("Обсуждение заявки:", reply_markup=get_chat_button(internal_id))
             break
@@ -1226,18 +1237,33 @@ async def tradein_admin_approve_finish(message: Message, state: FSMContext):
 
 async def _send_tradein_contract_package(user_id: int) -> None:
     """Договор купли-продажи + инструкция по заполнению — сразу после одобрения."""
-    contract_path = _find_tradein_contract_path()
-    if contract_path:
+    from utils.bot_config import get_managed_file
+    managed = await get_managed_file("file.tradein_contract")
+    sent = False
+    if managed and managed.get("file_id"):
         try:
             await bot.send_document(
                 user_id,
-                document=FSInputFile(contract_path),
+                document=managed["file_id"],
                 caption="📄 Договор купли-продажи Trade-in",
             )
+            sent = True
         except Exception as exc:
-            logger.error("Failed to send tradein contract file to user %s: %s", user_id, exc)
-    else:
-        logger.warning("Tradein contract file not found in %s", TRADEIN_ASSETS_DIR)
+            logger.warning("Managed contract file_id failed, fallback to assets: %s", exc)
+    if not sent:
+        contract_path = _find_tradein_contract_path()
+        if contract_path:
+            try:
+                await bot.send_document(
+                    user_id,
+                    document=FSInputFile(contract_path),
+                    caption="📄 Договор купли-продажи Trade-in",
+                )
+                sent = True
+            except Exception as exc:
+                logger.error("Failed to send tradein contract file to user %s: %s", user_id, exc)
+        else:
+            logger.warning("Tradein contract file not found in %s", TRADEIN_ASSETS_DIR)
 
     instructions = Text(
         Bold("Договор купли продажи Трейд-ин"), "\n\n",
@@ -1267,6 +1293,15 @@ async def _send_tradein_approval_reminder(user_id: int, display_id: str) -> None
         await bot.send_message(user_id, **reminder.as_kwargs())
     except Exception as exc:
         logger.error("Failed to send tradein approval reminder text to user %s: %s", user_id, exc)
+
+    from utils.bot_config import get_managed_file
+    managed = await get_managed_file("file.tradein_memo")
+    if managed and managed.get("file_id"):
+        try:
+            await bot.send_document(user_id, document=managed["file_id"])
+            return
+        except Exception as exc:
+            logger.warning("Managed memo file_id failed, fallback to assets: %s", exc)
 
     memo_path = _find_tradein_memo_path()
     if memo_path:
@@ -1480,7 +1515,7 @@ async def tradein_outcome_accepted(cb: CallbackQuery, state: FSMContext):
 
     await state.set_state(TradeinOutcomeFSM.waiting_for_buyout_amount)
     await state.update_data(tradein_outcome_claim_id=claim_id)
-    sent = await cb.message.answer(BUYOUT_AMOUNT_PROMPT, reply_markup=cancel_only_keyboard())
+    sent = await cb.message.answer(BUYOUT_AMOUNT_PROMPT, reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
     await cb.answer()
 
@@ -1498,7 +1533,7 @@ async def tradein_outcome_buyout_amount(message: Message, state: FSMContext):
 
     amount = _parse_positive_buyout_amount(message.text or "")
     if amount is None:
-        sent = await message.answer(BUYOUT_AMOUNT_INVALID, reply_markup=cancel_only_keyboard())
+        sent = await message.answer(BUYOUT_AMOUNT_INVALID, reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
 
@@ -1513,7 +1548,7 @@ async def tradein_outcome_buyout_amount(message: Message, state: FSMContext):
         await set_claim_buyout_amount(claim_id, amount)
     except Exception as exc:
         logger.error("Failed to save buyout_amount=%s for claim %s: %s", amount, claim_id, exc)
-        sent = await message.answer("❌ Не удалось сохранить сумму. Попробуйте ещё раз.", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("❌ Не удалось сохранить сумму. Попробуйте ещё раз.", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
 

@@ -13,6 +13,7 @@ from handlers.complaint import router as complaint_router
 from handlers.tech_adjustment import router as tech_adjustment_router
 from handlers.admin import router as admin_router
 from handlers.super_admin import router as super_admin_router
+from handlers.manage import router as manage_router
 from handlers.chat import router as chat_router
 from utils.claim_timer_service import claim_timer_loop
 
@@ -45,6 +46,7 @@ dp.include_router(complaint_router)
 dp.include_router(tech_adjustment_router)
 dp.include_router(admin_router)
 dp.include_router(super_admin_router)
+dp.include_router(manage_router)
 dp.include_router(chat_router)
 
 async def scheduler_task():

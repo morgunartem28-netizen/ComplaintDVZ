@@ -4,7 +4,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.utils.formatting import Text, Bold, Italic
 from database import create_claim, get_admins_by_role, update_claim_status, add_claim_history, save_claim_admin_card
 from keyboards import (
-    get_mp_buttons, get_warranty_status_buttons, get_imei_missing_button, append_chat_button_row,
+    get_mp_buttons, get_warranty_status_buttons, get_imei_missing_button, imei_missing_label,
+    append_chat_button_row,
     get_chat_button, get_ptv_admin_decision,
 )
 from states import TechState
@@ -50,7 +51,7 @@ async def tech_ptv_start(cb: CallbackQuery, state: FSMContext):
     await _safe_delete_message(cb)
     await state.clear()
     await state.update_data(category_type="ptv")
-    sent = await cb.message.answer("🆕 Укажите название устройства:", reply_markup=cancel_only_keyboard())
+    sent = await cb.message.answer("🆕 Укажите название устройства:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
     await state.set_state(TechState.ptv_device_name)
 
@@ -59,15 +60,15 @@ async def ptv_device_name_received(message: Message, state: FSMContext):
     await track_message(state, message)
     device_name = message.text.strip()
     if not device_name:
-        sent = await message.answer("⚠️ Название устройства не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Название устройства не может быть пустым. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(device_name=device_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_device_name")]])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="ptv_imei_missing")])
+    kb.inline_keyboard.append([InlineKeyboardButton(text=await imei_missing_label(), callback_data="ptv_imei_missing")])
     sent = await message.answer(
         "📱 Укажите IMEI устройства, если он есть:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_imei)
@@ -79,7 +80,7 @@ async def ptv_imei_missing(cb: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_device_name")]])
     sent = await cb.message.answer(
         "📝 Опишите дефект со слов клиента:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_defect)
@@ -90,14 +91,14 @@ async def ptv_imei_received(message: Message, state: FSMContext):
     await track_message(state, message)
     imei = message.text.strip()
     if not imei:
-        sent = await message.answer("⚠️ IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(imei=imei)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_device_name")]])
     sent = await message.answer(
         "📝 Опишите дефект со слов клиента:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_defect)
@@ -107,14 +108,14 @@ async def ptv_defect_received(message: Message, state: FSMContext):
     await track_message(state, message)
     defect = message.text.strip()
     if not defect:
-        sent = await message.answer("⚠️ Опишите дефект:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Опишите дефект:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(defect=defect)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_imei")]])
     sent = await message.answer(
         "🔧 Присутствуют ли механические повреждения?\n(Царапины, сколы, трещины, вмятины и т.д.)",
-        reply_markup=with_cancel_button(get_mp_buttons())
+        reply_markup=await with_cancel_button(await get_mp_buttons())
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_mp_check)
@@ -125,7 +126,7 @@ async def ptv_mp_check_selected(cb: CallbackQuery, state: FSMContext):
     await state.update_data(mp_status=mp_status)
     await _safe_delete_message(cb)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_defect")]])
-    sent = await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+    sent = await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_date)
 
@@ -144,7 +145,7 @@ async def _ptv_date_confirmed(target: Message | CallbackQuery, state: FSMContext
     await state.update_data(days_text=days_text, days_int=days_int)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_mp_check")]])
     answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
-    sent = await answer("👤 Введите ФИО клиента (полностью):", reply_markup=with_cancel_button(kb))
+    sent = await answer("👤 Введите ФИО клиента (полностью):", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_client_name)
 
@@ -156,12 +157,12 @@ async def ptv_date_valid(message: Message, state: FSMContext):
     if not is_valid_date_ddmmyyyy(date_str):
         sent = await message.answer(
             "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
-            reply_markup=cancel_only_keyboard()
+            reply_markup=await cancel_only_keyboard()
         )
         await track_message(state, sent)
         return
     if is_future_date_ddmmyyyy(date_str):
-        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=cancel_only_keyboard())
+        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await _ptv_date_confirmed(message, state, date_str)
@@ -171,7 +172,7 @@ async def ptv_date_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
     sent = await message.answer(
         "⚠️ Неверный формат! Используйте ДД.ММ.ГГГГ:",
-        reply_markup=cancel_only_keyboard()
+        reply_markup=await cancel_only_keyboard()
     )
     await track_message(state, sent)
 
@@ -181,12 +182,12 @@ async def ptv_client_name_received(message: Message, state: FSMContext):
     await track_message(state, message)
     client_name = message.text.strip()
     if not client_name:
-        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(client_name=client_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_date")]])
-    sent = await message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=with_cancel_button(kb))
+    sent = await message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_photo_front)
 
@@ -195,28 +196,28 @@ async def ptv_photo_front_received(message: Message, state: FSMContext):
     await track_message(state, message)
     await state.update_data(photo_front=message.photo[-1].file_id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_client_name")]])
-    sent = await message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=with_cancel_button(kb))
+    sent = await message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_photo_back)
 
 @router.message(TechState.ptv_photo_front)
 async def ptv_photo_front_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
-    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=cancel_only_keyboard())
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
 
 @router.message(TechState.ptv_photo_back, F.photo)
 async def ptv_photo_back_received(message: Message, state: FSMContext):
     await track_message(state, message)
     await state.update_data(photo_back=message.photo[-1].file_id)
-    sent = await message.answer("📄 Есть ли гарантийный талон?", reply_markup=with_cancel_button(get_warranty_status_buttons()))
+    sent = await message.answer("📄 Есть ли гарантийный талон?", reply_markup=await with_cancel_button(await get_warranty_status_buttons()))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.ptv_warranty_choice)
 
 @router.message(TechState.ptv_photo_back)
 async def ptv_photo_back_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
-    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=cancel_only_keyboard())
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
 
 @router.callback_query(F.data.startswith("warranty_"), TechState.ptv_warranty_choice)
@@ -227,7 +228,7 @@ async def ptv_warranty_choice_selected(cb: CallbackQuery, state: FSMContext):
         await track_message(state, sent)
         await process_ptv_claim(cb.message, state, cb.from_user)
     elif cb.data == "warranty_photo":
-        sent = await cb.message.answer("📸 Отправьте фото гарантийного талона:", reply_markup=cancel_only_keyboard())
+        sent = await cb.message.answer("📸 Отправьте фото гарантийного талона:", reply_markup=await cancel_only_keyboard())
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_photo_warranty)
 
@@ -242,7 +243,7 @@ async def ptv_photo_warranty_received(message: Message, state: FSMContext):
 @router.message(TechState.ptv_photo_warranty)
 async def ptv_photo_warranty_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
-    sent = await message.answer("⚠️ Пожалуйста, отправьте фото талона:", reply_markup=cancel_only_keyboard())
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото талона:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
 
 async def process_ptv_claim(message: Message, state: FSMContext, user):
@@ -393,78 +394,78 @@ async def tech_back_handler(cb: CallbackQuery, state: FSMContext):
     await _safe_delete_message(cb)
 
     if target_state == TechState.ptv_device_name:
-        sent = await cb.message.answer("🆕 Укажите название устройства:", reply_markup=cancel_only_keyboard())
+        sent = await cb.message.answer("🆕 Укажите название устройства:", reply_markup=await cancel_only_keyboard())
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_device_name)
     elif target_state == TechState.ptv_imei:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_device_name")]])
-        kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="ptv_imei_missing")])
-        sent = await cb.message.answer("📱 Укажите IMEI устройства, если он есть:", reply_markup=with_cancel_button(kb))
+        kb.inline_keyboard.append([InlineKeyboardButton(text=await imei_missing_label(), callback_data="ptv_imei_missing")])
+        sent = await cb.message.answer("📱 Укажите IMEI устройства, если он есть:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_imei)
     elif target_state == TechState.ptv_defect:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_imei")]])
-        sent = await cb.message.answer("📝 Опишите дефект со слов клиента:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📝 Опишите дефект со слов клиента:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_defect)
     elif target_state == TechState.ptv_mp_check:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_defect")]])
-        sent = await cb.message.answer("🔧 Присутствуют ли механические повреждения?", reply_markup=with_cancel_button(get_mp_buttons()))
+        sent = await cb.message.answer("🔧 Присутствуют ли механические повреждения?", reply_markup=await with_cancel_button(await get_mp_buttons()))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_mp_check)
     elif target_state == TechState.ptv_date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_mp_check")]])
-        sent = await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_date)
     elif target_state == TechState.ptv_client_name:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_date")]])
-        sent = await cb.message.answer("👤 Введите ФИО клиента (полностью):", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("👤 Введите ФИО клиента (полностью):", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_client_name)
     elif target_state == TechState.ptv_photo_front:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_client_name")]])
-        sent = await cb.message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_photo_front)
     elif target_state == TechState.ptv_photo_back:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("ptv_photo_front")]])
-        sent = await cb.message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.ptv_photo_back)
     elif target_state == TechState.new_device_name:
-        sent = await cb.message.answer("🆕 Новое устройство\n\nКакое устройство сдают? (Название/Модель):", reply_markup=cancel_only_keyboard())
+        sent = await cb.message.answer("🆕 Новое устройство\n\nКакое устройство сдают? (Название/Модель):", reply_markup=await cancel_only_keyboard())
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_device_name)
     elif target_state == TechState.new_imei:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_device_name")]])
-        kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="new_imei_missing")])
-        sent = await cb.message.answer("📱 Укажите IMEI устройства, если он есть:", reply_markup=with_cancel_button(kb))
+        kb.inline_keyboard.append([InlineKeyboardButton(text=await imei_missing_label(), callback_data="new_imei_missing")])
+        sent = await cb.message.answer("📱 Укажите IMEI устройства, если он есть:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_imei)
     elif target_state == TechState.new_defect:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_imei")]])
-        sent = await cb.message.answer("📝 Опишите дефект со слов клиента:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📝 Опишите дефект со слов клиента:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_defect)
     elif target_state == TechState.new_date:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_defect")]])
-        sent = await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_date)
     elif target_state == TechState.new_client_name:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_date")]])
-        sent = await cb.message.answer("👤 Введите ФИО клиента (полностью):", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("👤 Введите ФИО клиента (полностью):", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_client_name)
     elif target_state == TechState.new_photo_front:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_client_name")]])
-        sent = await cb.message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_photo_front)
     elif target_state == TechState.new_photo_back:
         kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_photo_front")]])
-        sent = await cb.message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=with_cancel_button(kb))
+        sent = await cb.message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=await with_cancel_button(kb))
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_photo_back)
 
@@ -480,7 +481,7 @@ async def tech_new_start(cb: CallbackQuery, state: FSMContext):
     await _safe_delete_message(cb)
     await state.clear()
     await state.update_data(category_type="new_device")
-    sent = await cb.message.answer("🆕 Новое устройство\n\nКакое устройство сдают? (Название/Модель):", reply_markup=cancel_only_keyboard())
+    sent = await cb.message.answer("🆕 Новое устройство\n\nКакое устройство сдают? (Название/Модель):", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
     await state.set_state(TechState.new_device_name)
 
@@ -489,15 +490,15 @@ async def new_device_name_received(message: Message, state: FSMContext):
     await track_message(state, message)
     device_name = message.text.strip()
     if not device_name:
-        sent = await message.answer("⚠️ Введите название устройства:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Введите название устройства:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(device_name=device_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_device_name")]])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="IMEI отсутствует", callback_data="new_imei_missing")])
+    kb.inline_keyboard.append([InlineKeyboardButton(text=await imei_missing_label(), callback_data="new_imei_missing")])
     sent = await message.answer(
         "📱 Укажите IMEI устройства, если он есть:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_imei)
@@ -509,7 +510,7 @@ async def new_imei_missing(cb: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_device_name")]])
     sent = await cb.message.answer(
         "📝 Опишите дефект со слов клиента:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_defect)
@@ -520,14 +521,14 @@ async def new_imei_received(message: Message, state: FSMContext):
     await track_message(state, message)
     imei = message.text.strip()
     if not imei:
-        sent = await message.answer("⚠️ IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ IMEI не может быть пустым. Повторите ввод или нажмите кнопку:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(imei=imei)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_device_name")]])
     sent = await message.answer(
         "📝 Опишите дефект со слов клиента:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_defect)
@@ -537,14 +538,14 @@ async def new_defect_received(message: Message, state: FSMContext):
     await track_message(state, message)
     defect = message.text.strip()
     if not defect:
-        sent = await message.answer("⚠️ Опишите дефект:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ Опишите дефект:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(defect=defect)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_imei")]])
     sent = await message.answer(
         "📅 Укажите дату покупки в формате ДД.ММ.ГГГГ:",
-        reply_markup=with_cancel_button(kb)
+        reply_markup=await with_cancel_button(kb)
     )
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_date)
@@ -564,7 +565,7 @@ async def _new_date_confirmed(target: Message | CallbackQuery, state: FSMContext
     await state.update_data(days_text=days_text, days_int=days_int)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_defect")]])
     answer = target.message.answer if isinstance(target, CallbackQuery) else target.answer
-    sent = await answer("👤 Введите ФИО клиента (полностью):", reply_markup=with_cancel_button(kb))
+    sent = await answer("👤 Введите ФИО клиента (полностью):", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_client_name)
 
@@ -576,12 +577,12 @@ async def new_date_valid(message: Message, state: FSMContext):
     if not is_valid_date_ddmmyyyy(date_str):
         sent = await message.answer(
             "Некорректная дата. Введите реальную дату в формате ДД.ММ.ГГГГ.",
-            reply_markup=cancel_only_keyboard()
+            reply_markup=await cancel_only_keyboard()
         )
         await track_message(state, sent)
         return
     if is_future_date_ddmmyyyy(date_str):
-        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=cancel_only_keyboard())
+        sent = await message.answer(FUTURE_PURCHASE_DATE_TEXT, reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await _new_date_confirmed(message, state, date_str)
@@ -591,7 +592,7 @@ async def new_date_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
     sent = await message.answer(
         "⚠️ Неверный формат! Используйте ДД.ММ.ГГГГ:",
-        reply_markup=cancel_only_keyboard()
+        reply_markup=await cancel_only_keyboard()
     )
     await track_message(state, sent)
 
@@ -601,12 +602,12 @@ async def new_client_name_received(message: Message, state: FSMContext):
     await track_message(state, message)
     client_name = message.text.strip()
     if not client_name:
-        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=cancel_only_keyboard())
+        sent = await message.answer("⚠️ ФИО не может быть пустым. Повторите ввод:", reply_markup=await cancel_only_keyboard())
         await track_message(state, sent)
         return
     await state.update_data(client_name=client_name)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_date")]])
-    sent = await message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=with_cancel_button(kb))
+    sent = await message.answer("📸 Отправьте фото лицевой стороны устройства:", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_photo_front)
 
@@ -615,14 +616,14 @@ async def new_photo_front_received(message: Message, state: FSMContext):
     await track_message(state, message)
     await state.update_data(photo_front=message.photo[-1].file_id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_client_name")]])
-    sent = await message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=with_cancel_button(kb))
+    sent = await message.answer("📸 Отправьте фото обратной стороны устройства:", reply_markup=await with_cancel_button(kb))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_photo_back)
 
 @router.message(TechState.new_photo_front)
 async def new_photo_front_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
-    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=cancel_only_keyboard())
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
 
 @router.message(TechState.new_photo_back, F.photo)
@@ -630,14 +631,14 @@ async def new_photo_back_received(message: Message, state: FSMContext):
     await track_message(state, message)
     await state.update_data(photo_back=message.photo[-1].file_id)
     kb = InlineKeyboardMarkup(inline_keyboard=[[back_btn_tech("new_photo_front")]])
-    sent = await message.answer("📄 Есть ли гарантийный талон?", reply_markup=with_cancel_button(get_warranty_status_buttons()))
+    sent = await message.answer("📄 Есть ли гарантийный талон?", reply_markup=await with_cancel_button(await get_warranty_status_buttons()))
     await track_prompt_after_cleanup(sent.bot, state, sent)
     await state.set_state(TechState.new_warranty_choice)
 
 @router.message(TechState.new_photo_back)
 async def new_photo_back_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
-    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=cancel_only_keyboard())
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
 
 @router.callback_query(F.data.startswith("warranty_"), TechState.new_warranty_choice)
@@ -648,7 +649,7 @@ async def new_warranty_choice_selected(cb: CallbackQuery, state: FSMContext):
         await track_message(state, sent)
         await process_new_device_claim(cb.message, state, cb.from_user)
     elif cb.data == "warranty_photo":
-        sent = await cb.message.answer("📸 Отправьте фото гарантийного талона:", reply_markup=cancel_only_keyboard())
+        sent = await cb.message.answer("📸 Отправьте фото гарантийного талона:", reply_markup=await cancel_only_keyboard())
         await track_prompt_after_cleanup(sent.bot, state, sent)
         await state.set_state(TechState.new_photo_warranty)
 
@@ -663,7 +664,7 @@ async def new_photo_warranty_received(message: Message, state: FSMContext):
 @router.message(TechState.new_photo_warranty)
 async def new_photo_warranty_invalid(message: Message, state: FSMContext):
     await track_message(state, message)
-    sent = await message.answer("⚠️ Пожалуйста, отправьте фото талона:", reply_markup=cancel_only_keyboard())
+    sent = await message.answer("⚠️ Пожалуйста, отправьте фото талона:", reply_markup=await cancel_only_keyboard())
     await track_message(state, sent)
 
 async def process_new_device_claim(message: Message, state: FSMContext, user):
@@ -738,17 +739,15 @@ async def process_new_device_claim(message: Message, state: FSMContext, user):
     elif days_int <= 14:
         status = "quality_check"
         action_text = "✅ Принять на Проверку Качества (ПК) (до 14 дней)"
-        client_instruction = (
-            "✅ Действие: Принять на Проверку Качества (ПК).\n"
-            "📄 [Оформите Акт приема на ГО](https://docs.google.com/spreadsheets/d/1kW5teyH7MSUO-kaHb2hvPvKmWYfwZporA12UzLmulWw/edit?usp=sharing)"
-        )
+        from utils.bot_config import get_setting, get_text
+        sheet = await get_setting("link.warranty_act_sheet")
+        client_instruction = await get_text("tech.instruction.quality_check", warranty_act_url=sheet)
     elif days_int <= 365:
         status = "repair"
         action_text = "✅ Принять на Гарантийный ремонт (до 1 года)"
-        client_instruction = (
-            "✅ Действие: Принять на Гарантийный ремонт.\n"
-            "📄 [Оформите Акт приема на ГО](https://docs.google.com/spreadsheets/d/1kW5teyH7MSUO-kaHb2hvPvKmWYfwZporA12UzLmulWw/edit?usp=sharing)"
-        )
+        from utils.bot_config import get_setting, get_text
+        sheet = await get_setting("link.warranty_act_sheet")
+        client_instruction = await get_text("tech.instruction.repair", warranty_act_url=sheet)
     else:
         status = "expired"
         action_text = "⚠️ Гарантия истекла (более 1 года)"

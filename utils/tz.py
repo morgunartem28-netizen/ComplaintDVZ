@@ -1,26 +1,23 @@
-"""Единая точка работы с часовым поясом ОТОБРАЖЕНИЯ — Asia/Yekaterinburg (UTC+5).
+"""Единая точка работы с часовым поясом ОТОБРАЖЕНИЯ.
+
+По умолчанию Asia/Yekaterinburg (UTC+5). Имя TZ можно сменить через
+bot_settings.timezone (/manage), без изменения хранения UTC в БД.
 
 ВАЖНО: хранение времени в БД НЕ меняется. SQLite `CURRENT_TIMESTAMP`
-(claims.created_at, claim_history.changed_at, chat_messages.timestamp,
-claims.taken_at, schema_migrations.applied_at) как хранил, так и хранит
-время в UTC (naive-строка вида "2026-08-10 05:06:00") — это единственно
-правильный формат для хранения, сравнения (julianday(...) в SQL-запросах) и
-сортировки. Всё, что делает этот модуль — конвертирует UTC в Asia/Yekaterinburg
-В МОМЕНТ показа времени пользователю, и больше нигде.
-
-Используется вместо разрозненных datetime.now()/date.today() по всему проекту
-(handlers/chat.py, utils/notifications.py, handlers/super_admin.py,
-handlers/technics.py, utils/export_format.py и т.д.), чтобы часовой пояс был
-задан ОДИН раз и не размножался вручную (`+ timedelta(hours=5)` и т.п.).
+как хранил, так и хранит время в UTC (naive-строка). Этот модуль только
+конвертирует UTC в display TZ в момент показа пользователю.
 """
 from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import logging
 
-DISPLAY_TZ = ZoneInfo("Asia/Yekaterinburg")
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TZ_NAME = "Asia/Yekaterinburg"
+DISPLAY_TZ = ZoneInfo(_DEFAULT_TZ_NAME)
 UTC_TZ = ZoneInfo("UTC")
+_DISPLAY_TZ_NAME = _DEFAULT_TZ_NAME
 
-# Форматы, в которых SQLite реально отдаёт CURRENT_TIMESTAMP / naive datetime
-# строки в этом проекте (с микросекундами и без, с разделителем "T" и без).
 _NAIVE_TIMESTAMP_FORMATS = (
     "%Y-%m-%d %H:%M:%S.%f",
     "%Y-%m-%d %H:%M:%S",
@@ -31,25 +28,47 @@ _NAIVE_TIMESTAMP_FORMATS = (
 DEFAULT_DISPLAY_FORMAT = "%d.%m.%Y %H:%M"
 
 
+def get_display_tz_name() -> str:
+    return _DISPLAY_TZ_NAME
+
+
+async def refresh_display_tz_from_settings() -> str:
+    """Читает bot_settings.timezone и обновляет DISPLAY_TZ (с fallback)."""
+    global DISPLAY_TZ, _DISPLAY_TZ_NAME
+    try:
+        from utils.bot_config import get_setting
+        name = (await get_setting("timezone", _DEFAULT_TZ_NAME)).strip() or _DEFAULT_TZ_NAME
+    except Exception as exc:
+        logger.warning("Failed to load timezone setting: %s", exc)
+        name = _DEFAULT_TZ_NAME
+    try:
+        DISPLAY_TZ = ZoneInfo(name)
+        _DISPLAY_TZ_NAME = name
+    except ZoneInfoNotFoundError:
+        logger.error("Invalid timezone %r, keeping %s", name, _DISPLAY_TZ_NAME)
+    return _DISPLAY_TZ_NAME
+
+
+def set_display_tz_name(name: str) -> bool:
+    """Синхронная установка TZ (после валидации в /manage)."""
+    global DISPLAY_TZ, _DISPLAY_TZ_NAME
+    try:
+        DISPLAY_TZ = ZoneInfo(name)
+        _DISPLAY_TZ_NAME = name
+        return True
+    except ZoneInfoNotFoundError:
+        return False
+
+
 def now_local() -> datetime:
-    """Текущее время в Asia/Yekaterinburg (aware datetime) — замена
-    datetime.now() везде, где момент времени формируется "прямо сейчас" для
-    показа пользователю (не для хранения в БД)."""
     return datetime.now(DISPLAY_TZ)
 
 
 def today_local() -> date:
-    """Сегодняшняя календарная дата в Asia/Yekaterinburg. Используется для
-    сравнений "дата покупки не в будущем" и подсчёта "дней с покупки" —
-    не date.today() (зависит от часового пояса сервера, что около полуночи
-    может дать неверный результат)."""
     return now_local().date()
 
 
 def parse_utc_timestamp(raw: str):
-    """Парсит "сырую" naive-строку времени из SQLite (CURRENT_TIMESTAMP,
-    фактически UTC) в aware datetime с tzinfo=UTC. None, если формат не
-    распознан (не должно ронять вызывающий код — просто нечего конвертировать)."""
     if not raw:
         return None
     for fmt in _NAIVE_TIMESTAMP_FORMATS:
@@ -61,11 +80,6 @@ def parse_utc_timestamp(raw: str):
 
 
 def to_local(value):
-    """Приводит значение (aware/naive datetime ИЛИ "сырую" строку из БД) к
-    aware datetime в Asia/Yekaterinburg. None, если преобразовать не удалось.
-
-    Naive datetime считается UTC (так реально хранятся все временные метки
-    в этом проекте — см. модульный docstring)."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -78,10 +92,6 @@ def to_local(value):
 
 
 def format_local(value, fmt: str = DEFAULT_DISPLAY_FORMAT) -> str:
-    """Форматирует datetime/строку из БД человекочитаемо, во времени
-    Asia/Yekaterinburg. Если распознать значение не удалось — возвращает
-    исходную строку как есть (лучше показать "сырое" значение, чем уронить
-    уведомление из-за неожиданного формата), либо "" для None/пустого."""
     local_dt = to_local(value)
     if local_dt is not None:
         return local_dt.strftime(fmt)

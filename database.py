@@ -186,6 +186,13 @@ async def init_db():
         await db.commit()
     logger.info("Database schema initialized (WAL mode, busy_timeout=%ss)", DB_BUSY_TIMEOUT_SECONDS)
     await apply_migrations()
+    try:
+        from utils.bot_config import ensure_bot_config_seeded
+        from utils.tz import refresh_display_tz_from_settings
+        await ensure_bot_config_seeded()
+        await refresh_display_tz_from_settings()
+    except Exception as exc:
+        logger.error("Failed to seed bot config / refresh timezone: %s", exc)
 
 async def apply_migrations():
     migrations_dir = Path(__file__).resolve().parent / "migrations"

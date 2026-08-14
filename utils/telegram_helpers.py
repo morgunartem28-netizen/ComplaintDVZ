@@ -92,10 +92,10 @@ async def safe_delete_message(cb: CallbackQuery) -> None:
         logger.warning("Failed to delete message: %s", exc)
 
 
-def with_cancel_button(
+async def with_cancel_button(
     kb: InlineKeyboardMarkup | None,
     callback_data: str = FLOW_CANCEL_CALLBACK,
-    text: str = "❌ Отмена",
+    text: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Возвращает копию клавиатуры `kb` с добавленной строкой кнопки отмены снизу
     (или новую клавиатуру из одной этой кнопки, если kb is None).
@@ -106,14 +106,23 @@ def with_cancel_button(
     Сама отмена обрабатывается один раз глобально — см. FLOW_CANCEL_CALLBACK
     и handlers/common.py: cb_flow_cancel.
     """
+    if text is None:
+        from utils.bot_config import get_setting
+        text = await get_setting("button.common.cancel", "❌ Отмена")
     rows = [row[:] for row in kb.inline_keyboard] if kb else []
     rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def cancel_only_keyboard(callback_data: str = FLOW_CANCEL_CALLBACK, text: str = "❌ Отмена") -> InlineKeyboardMarkup:
+async def cancel_only_keyboard(
+    callback_data: str = FLOW_CANCEL_CALLBACK,
+    text: str | None = None,
+) -> InlineKeyboardMarkup:
     """Клавиатура из одной кнопки отмены — для шагов, где бот ждёт свободный
     текст/фото и своей клавиатуры выбора вариантов у шага нет."""
+    if text is None:
+        from utils.bot_config import get_setting
+        text = await get_setting("button.common.cancel", "❌ Отмена")
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=callback_data)]])
 
 

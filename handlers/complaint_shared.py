@@ -41,7 +41,7 @@ async def send_to_complaint_admins(
         logger.error("No admin_complaint admins configured, claim %s not delivered", display_id)
         await message.answer(
             "Администратор для корректировки остатков не назначен.",
-            reply_markup=get_main_menu()
+            reply_markup=await get_main_menu()
         )
         return
 
@@ -77,7 +77,7 @@ async def send_to_complaint_admins(
         logger.info("Complaint claim %s notified %s/%s admins", display_id, sent_count, len(complaint_admins))
         await message.answer(
             f"Запрос по заявке {display_id} отправлен! Ожидайте обработки.",
-            reply_markup=get_main_menu()
+            reply_markup=await get_main_menu()
         )
         if show_chat_button:
             await message.answer("Обсуждение заявки:", reply_markup=get_chat_button(claim_id))
@@ -85,5 +85,5 @@ async def send_to_complaint_admins(
         logger.error("Complaint claim %s: failed to notify any admin", display_id)
         await message.answer(
             "Не удалось отправить запрос администратору.",
-            reply_markup=get_main_menu()
+            reply_markup=await get_main_menu()
         )
